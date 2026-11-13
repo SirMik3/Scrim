@@ -175,6 +175,26 @@ jobs:
           path: snapshot.png
           if-no-files-found: ignore
 
+  # The single check that branch protection requires. It depends on every build, so
+  # adding or removing distros doesn't mean editing the ruleset.
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [source, linux, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check that every build succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            if [ "$result" != success ]; then
+              echo "::error::A required build did not succeed ($result)"
+              exit 1
+            fi
+          done
+
   release:
     name: Draft GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
