@@ -1,0 +1,29 @@
+Source: scrim
+Section: x11
+Priority: optional
+Maintainer: Mike Efarov <SirMik3@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13),
+               pkgconf | pkg-config,
+               libwayland-dev,
+               wayland-protocols,
+               libegl-dev,
+               libgles-dev,
+               libx11-dev,
+               libxrandr-dev,
+               libxfixes-dev,
+               libjson-c-dev,
+               libpng-dev,
+               libjpeg-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/SirMik3/Scrim
+Rules-Requires-Root: no
+
+Package: scrim
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: libegl-mesa0, libgl1-mesa-dri
+Description: lightweight animated effects over your desktop wallpaper
+ Scrim draws GPU shader effects, such as rain on glass, in a click-through layer
+ between the wallpaper and your windows. It uses wlr-layer-shell on Wayland
+ (KDE Plasma, Sway, Hyprland and others) and a desktop-type window on X11, and
+ stops rendering when the desktop is hidden or the machine runs on battery.

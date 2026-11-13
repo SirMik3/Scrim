@@ -1,0 +1,18 @@
+#!/usr/bin/make -f
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --sourcedirectory=linux
+
+override_dh_auto_build:
+	dh_auto_build -- PREFIX=/usr
+
+override_dh_auto_install:
+	dh_auto_install -- PREFIX=/usr RELEASE=1
+
+override_dh_auto_test:
+
+# Ship the systemd user unit but don't enable it for every user on install;
+# users opt in with `systemctl --user enable --now scrim` (same as Fedora/Arch).
+override_dh_installsystemduser:
+	dh_installsystemduser --no-enable
