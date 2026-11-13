@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "id": "plain",
+  "name": "Plain (no effect)",
+  "version": "0.1.0",
+  "license": "MIT",
+  "passes": [ { "shader": "plain.frag" } ],
+  "params": []
+}

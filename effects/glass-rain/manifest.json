@@ -1,0 +1,18 @@
+{
+  "format": 1,
+  "id": "glass-rain",
+  "name": "Rain on Glass (Heartfelt)",
+  "version": "0.1.0",
+  "author": "Martijn Steinrucken (BigWIngs), modified variant; ported to Scrim",
+  "license": "CC BY-NC-SA 3.0",
+  "source": "https://www.shadertoy.com/view/ltffzl",
+  "passes": [ { "shader": "glass-rain.frag" } ],
+  "params": [
+    { "id": "rain",   "label": "Rain amount",      "type": "float", "min": 0,    "max": 1, "default": 1.0 },
+    { "id": "speed",  "label": "Speed",            "type": "float", "min": 0.05, "max": 1, "default": 0.3 },
+    { "id": "fog",    "label": "Foggy glass",      "type": "float", "min": 0,    "max": 8, "default": 5.0 },
+    { "id": "clear",  "label": "Drop blur",        "type": "float", "min": 0,    "max": 4, "default": 0.0 },
+    { "id": "zoom",   "label": "Drop scale",       "type": "float", "min": 0.5,  "max": 2, "default": 1.0 },
+    { "id": "darken", "label": "Darken",           "type": "float", "min": 0,    "max": 1, "default": 0.0 }
+  ]
+}

@@ -1,0 +1,23 @@
+Rain on Glass (Heartfelt) — Scrim effect
+
+Based on "Heartfelt" by Martijn Steinrucken (BigWIngs)
+  https://www.shadertoy.com/view/ltffzl
+via a modified variant found on Shadertoy (German-commented version with
+FOGGY_GLASS / CLEAR_GLASS settings and a reworked refraction).
+
+License: Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported
+  https://creativecommons.org/licenses/by-nc-sa/3.0/
+
+This effect folder (and only this folder) is under that license. It may not be
+used commercially, and modified versions must keep this license and credit.
+
+Changes made for Scrim:
+- Ported from Shadertoy's mainImage/iChannel0 to the Scrim effect format
+  (y-down coordinates, aspect-filled wallpaper via wallpaperUV()).
+- The #define settings became user parameters (rain amount, speed, fog,
+  clarity, drop scale); added an optional Darken parameter (default 0).
+- Removed the 10-second fade-in (Scrim's clock pauses and can reset).
+- Wallpaper sampling uses a smooth cubic B-spline filter for blurred mip levels
+  (textureLodSmooth) so the fog doesn't look blocky on large Retina screens.
+- Drops default to no blur (CLEAR_GLASS 1.5 -> 0), so they show the wallpaper
+  at full resolution; the "Drop blur" slider restores the original softness.

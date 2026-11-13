@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""effectc — compile a Scrim effect folder (see spec/effect-format.md).
+
+Usage:
+    tools/effectc <effect-dir> [<effect-dir> ...]
+
+For every pass in manifest.json it writes into <effect-dir>/build/:
+    <stem>.glsl   full GLSL 450 source (prelude + param defines + shader)
+    <stem>.spv    SPIR-V, via glslangValidator
+    <stem>.metal  Metal Shading Language, via spirv-cross
+    <stem>.gles   GLSL ES 3.00, via spirv-cross (OpenGL / OpenGL ES hosts)
+
+Requires glslangValidator and spirv-cross on PATH
+(macOS: brew install glslang spirv-cross).
+"""
+import json
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+PRELUDE = Path(__file__).resolve().parent / "prelude.glsl"
+MAX_PASSES = 8
+MAX_PARAMS = 16
+ID_RE = re.compile(r"^[a-z0-9-]+$")
+IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class EffectError(Exception):
+    pass
+
+
+def validate(manifest: dict, effect_dir: Path) -> None:
+    def need(cond, msg):
+        if not cond:
+            raise EffectError(msg)
+
+    need(manifest.get("format") == 1, 'manifest "format" must be 1')
+    need(isinstance(manifest.get("id"), str) and ID_RE.match(manifest["id"]),
+         '"id" must match [a-z0-9-]+')
+    need(isinstance(manifest.get("name"), str), '"name" is required')
+    passes = manifest.get("passes")
+    need(isinstance(passes, list) and 1 <= len(passes) <= MAX_PASSES,
+         f'"passes" must be a list of 1..{MAX_PASSES} entries')
+    stems = set()
+    for i, p in enumerate(passes):
+        shader = p.get("shader")
+        need(isinstance(shader, str) and (effect_dir / shader).is_file(),
+             f"pass {i}: shader file {shader!r} not found")
+        stem = Path(shader).stem
+        need(stem not in stems, f"pass {i}: duplicate shader stem {stem!r}")
+        stems.add(stem)
+        scale = p.get("scale", 1.0)
+        need(isinstance(scale, (int, float)) and 0.125 <= scale <= 1.0,
+             f"pass {i}: scale must be in [0.125, 1]")
+    params = manifest.get("params", [])
+    need(isinstance(params, list) and len(params) <= MAX_PARAMS,
+         f'"params" must be a list of at most {MAX_PARAMS} entries')
+    ids = set()
+    for p in params:
+        pid = p.get("id")
+        need(isinstance(pid, str) and IDENT_RE.match(pid), f"param id {pid!r} is not a valid identifier")
+        need(pid not in ids, f"duplicate param id {pid!r}")
+        ids.add(pid)
+        need(isinstance(p.get("label"), str), f"param {pid}: label is required")
+        kind = p.get("type")
+        if kind == "float":
+            lo, hi, d = p.get("min"), p.get("max"), p.get("default")
+            need(all(isinstance(v, (int, float)) for v in (lo, hi, d)),
+                 f"param {pid}: float needs numeric min/max/default")
+            need(lo < hi and lo <= d <= hi, f"param {pid}: need min < max and min <= default <= max")
+        elif kind == "bool":
+            need(isinstance(p.get("default"), bool), f"param {pid}: bool needs a true/false default")
+        else:
+            raise EffectError(f"param {pid}: type must be 'float' or 'bool'")
+
+
+def run(cmd: list) -> None:
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        out = (result.stdout + result.stderr).strip()
+        raise EffectError(f"{Path(cmd[0]).name} failed:\n{out}")
+
+
+def compile_effect(effect_dir: Path) -> None:
+    manifest_path = effect_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise EffectError(f"{manifest_path} not found")
+    manifest = json.loads(manifest_path.read_text())
+    validate(manifest, effect_dir)
+
+    defines = "".join(
+        f"#define p_{p['id']} uParams[{i}].x\n" for i, p in enumerate(manifest.get("params", []))
+    )
+    prelude = PRELUDE.read_text()
+    build = effect_dir / "build"
+    build.mkdir(exist_ok=True)
+
+    for p in manifest["passes"]:
+        src_path = effect_dir / p["shader"]
+        stem = src_path.stem
+        source = prelude + defines + "#line 1\n" + src_path.read_text()
+        glsl = build / f"{stem}.glsl"
+        spv = build / f"{stem}.spv"
+        msl = build / f"{stem}.metal"
+        gles = build / f"{stem}.gles"
+        glsl.write_text(source)
+        try:
+            run(["glslangValidator", "-V", "-S", "frag", "--target-env", "vulkan1.0",
+                 "-o", str(spv), str(glsl)])
+        except EffectError as e:
+            raise EffectError(f"{p['shader']}: {e}\n(line numbers refer to {p['shader']})")
+        run(["spirv-cross", "--msl", "--msl-version", "20100", "--msl-decoration-binding",
+             "--output", str(msl), str(spv)])
+        run(["spirv-cross", "--es", "--version", "300", "--output", str(gles), str(spv)])
+        print(f"  {effect_dir.name}/{p['shader']} -> build/{stem}.{{glsl,spv,metal,gles}}")
+
+
+def main(argv: list) -> int:
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0 if len(argv) >= 2 else 2
+    for tool in ("glslangValidator", "spirv-cross"):
+        if shutil.which(tool) is None:
+            print(f"effectc: {tool} not found on PATH (brew install glslang spirv-cross)", file=sys.stderr)
+            return 1
+    failed = False
+    for arg in argv[1:]:
+        effect_dir = Path(arg).resolve()
+        print(f"effectc: {effect_dir.name}")
+        try:
+            compile_effect(effect_dir)
+        except (EffectError, json.JSONDecodeError) as e:
+            print(f"effectc: error in {effect_dir.name}: {e}", file=sys.stderr)
+            failed = True
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
