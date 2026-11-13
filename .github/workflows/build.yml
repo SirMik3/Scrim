@@ -1,0 +1,226 @@
+# Builds Scrim packages for macOS and Linux distributions.
+#
+#   push / pull request   build and smoke-test every package; download them from the
+#                         run's "Artifacts" section (versions look like 0.1.0~dev.42)
+#   push a tag "vX.Y.Z"   same, then create a DRAFT GitHub release with every package
+#                         and SHA256SUMS. The tag must match the VERSION file.
+#
+# Optional macOS signing + notarization: add these repository secrets
+#   MACOS_CERTIFICATE_P12        base64 of a "Developer ID Application" .p12
+#   MACOS_CERTIFICATE_PASSWORD   its password
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarytool (app-specific password)
+# Without them the app is ad-hoc signed (users must allow it in System Settings).
+name: Build packages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  source:
+    name: Source tarball
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Determine version
+        id: version
+        run: |
+          base=$(cat VERSION)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            if [[ "${GITHUB_REF_NAME#v}" != "$base" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME doesn't match VERSION file ($base)"
+              exit 1
+            fi
+            version=$base
+          else
+            version="$base~dev.$GITHUB_RUN_NUMBER"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Version: $version"
+
+      - name: Install shader tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q glslang-tools spirv-cross
+
+      - name: Build source tarball (shaders precompiled)
+        run: packaging/make-source-tarball.sh "${{ steps.version.outputs.version }}" dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    name: ${{ matrix.distro }} (${{ matrix.arch }})
+    needs: source
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian-12, debian-13, ubuntu-24.04, ubuntu-26.04, fedora, opensuse-tumbleweed, arch]
+        arch: [x86_64, aarch64]
+        include:
+          - { distro: debian-12, image: 'debian:12' }
+          - { distro: debian-13, image: 'debian:13' }
+          - { distro: ubuntu-24.04, image: 'ubuntu:24.04' }
+          - { distro: ubuntu-26.04, image: 'ubuntu:26.04' }
+          - { distro: fedora, image: 'fedora:latest' }
+          - { distro: opensuse-tumbleweed, image: 'opensuse/tumbleweed' }
+          - { distro: arch, image: 'archlinux:base-devel' }
+        exclude:
+          - { distro: arch, arch: aarch64 }   # Arch Linux has no official ARM image
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: source
+          path: dist
+
+      - name: Build, install and smoke-test package
+        shell: bash
+        run: bash packaging/ci/build-linux-package.sh "dist/scrim-${{ needs.source.outputs.version }}.tar.gz" out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-${{ matrix.distro }}-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS (universal)
+    needs: source
+    runs-on: macos-26
+    env:
+      HAS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+      HAS_NOTARY: ${{ secrets.APPLE_APP_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install shader tools
+        run: brew install glslang spirv-cross
+
+      - name: Import Developer ID certificate
+        if: env.HAS_SIGNING == 'true'
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kc_pass=$(openssl rand -hex 16)
+          security create-keychain -p "$kc_pass" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$kc_pass" "$kc"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$kc_pass" "$kc" >/dev/null
+          # shellcheck disable=SC2046  # existing keychains, one word each
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$kc" | grep -o '"Developer ID Application[^"]*"' | head -1 | tr -d '"')
+          [ -n "$identity" ] || { echo "::error::No Developer ID Application identity in the certificate"; exit 1; }
+          echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Build universal app, .zip and .dmg
+        env:
+          SCRIM_VERSION: ${{ needs.source.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: macos/build.sh --release --universal --package
+
+      - name: Notarize and staple
+        if: env.HAS_SIGNING == 'true' && env.HAS_NOTARY == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          dmg=$(ls macos/build/Scrim-*-macos.dmg)
+          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$dmg"
+
+      - name: Smoke test (offscreen render)
+        # Hosted macOS runners are VMs; Metal may be limited there, so this is informational.
+        continue-on-error: true
+        run: |
+          macos/build/Scrim.app/Contents/MacOS/Scrim --snapshot snapshot.png --size 960x600 --time 12
+          lipo -archs macos/build/Scrim.app/Contents/MacOS/Scrim
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-macos-universal
+          path: |
+            macos/build/Scrim-*-macos.zip
+            macos/build/Scrim-*-macos.dmg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: macos-snapshot
+          path: snapshot.png
+          if-no-files-found: ignore
+
+  release:
+    name: Draft GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [source, linux, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: source
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pkg-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.source.outputs.version }}
+        run: |
+          cat > notes.md <<EOF
+          ## Install
+
+          | Platform | File |
+          |---|---|
+          | macOS 14+ (Apple silicon and Intel) | \`Scrim-$VERSION-macos.dmg\` (or \`.zip\`) |
+          | Debian 12 / 13 | \`scrim_$VERSION-1~debian12_*.deb\` / \`~debian13\`: \`sudo apt install ./scrim_….deb\` |
+          | Ubuntu 24.04 / 26.04 | \`scrim_$VERSION-1~ubuntu24.04_*.deb\` / \`~ubuntu26.04\` |
+          | Fedora | \`scrim-$VERSION-1.fc*.rpm\`: \`sudo dnf install ./scrim-….rpm\` |
+          | openSUSE Tumbleweed | \`scrim-$VERSION-1.opensuse.*.rpm\`: \`sudo zypper install ./scrim-….rpm\` |
+          | Arch Linux | \`scrim-$VERSION-1-x86_64.pkg.tar.zst\`: \`sudo pacman -U ./scrim-….pkg.tar.zst\` |
+          | Source | \`scrim-$VERSION.tar.gz\` (shaders precompiled) |
+
+          Linux packages are built for x86_64 (\`amd64\`) and aarch64 (\`arm64\`), except Arch (x86_64).
+          On Linux, start it with \`systemctl --user enable --now scrim\` or from your compositor's autostart.
+
+          \`scrim-effects-noncommercial-$VERSION.zip\` contains effects under non-commercial
+          licenses (e.g. Rain on Glass, CC BY-NC-SA 3.0), which aren't included in the packages.
+          See the README inside it for how to install them.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+              --draft --title "Scrim $VERSION" --notes-file notes.md --generate-notes

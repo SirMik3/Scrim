@@ -15,6 +15,28 @@ theatre, where a scrim is a gauze backdrop that lighting effects are played onto
 Both draw in a click-through layer above the system wallpaper and below everything
 else, on every display, and stop rendering when the desktop can't be seen.
 
+## Download
+
+Packages for every release are on the [Releases page](https://github.com/SirMik3/Scrim/releases):
+
+| Platform | Package | Install |
+|---|---|---|
+| macOS 14+ (Apple silicon and Intel) | `Scrim-<version>-macos.dmg` / `.zip` | drag to Applications |
+| Debian 12, 13 / Ubuntu 24.04, 26.04 | `scrim_<version>-1~<distro>_<arch>.deb` | `sudo apt install ./scrim_….deb` |
+| Fedora | `scrim-<version>-1.fc<N>.<arch>.rpm` | `sudo dnf install ./scrim-….rpm` |
+| openSUSE Tumbleweed | `scrim-<version>-1.opensuse.<arch>.rpm` | `sudo zypper install ./scrim-….rpm` |
+| Arch Linux | `scrim-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U ./scrim-….pkg.tar.zst` |
+
+Linux packages exist for x86_64 and aarch64 (Arch: x86_64). They don't start Scrim
+automatically. Enable it per user with `systemctl --user enable --now scrim`, or add
+`scrim` to your compositor's autostart.
+
+Until the macOS app is signed with a Developer ID, macOS will block the first launch.
+Open it once, then go to System Settings → Privacy & Security and choose "Open Anyway".
+
+Effects under non-commercial licences (such as Rain on Glass) aren't in the packages.
+They're a separate download, `scrim-effects-noncommercial-<version>.zip`.
+
 ## macOS (14+)
 
 ```sh
@@ -22,6 +44,7 @@ brew install glslang spirv-cross
 macos/build.sh --run                # build macos/build/Scrim.app and launch it
 macos/build.sh --install --run      # also copy it to ~/Applications (best for Launch at Login)
 macos/build.sh --release            # leave out non-commercial effects (see Licenses)
+macos/build.sh --universal --package  # Apple silicon + Intel, plus .zip and .dmg
 ```
 
 The menu-bar icon (a cloud) lets you:
@@ -114,6 +137,41 @@ at a folder. Read the portability rules in the spec. In particular, never call
 
 macOS: `SCRIM_DEBUG=1` logs the frame rate, pause reasons and memory every 5 s.
 Linux: `scrim --stats` does the same.
+
+## Building packages and releasing
+
+`.github/workflows/build.yml` runs on every push and pull request. It:
+
+1. builds a source tarball with the shaders precompiled (`packaging/make-source-tarball.sh`);
+2. builds a native package inside each distribution's container and **installs and
+   smoke-tests it there** (`packaging/ci/build-linux-package.sh`). The recipes are
+   `packaging/debian/`, `packaging/rpm/scrim.spec` and `packaging/arch/PKGBUILD`;
+3. builds the universal macOS app, `.zip` and `.dmg` (`macos/build.sh --release --universal --package`).
+
+Every run's packages can be downloaded from its "Artifacts" section, with versions like
+`0.1.0~dev.42`. To release:
+
+```sh
+echo 0.2.0 > VERSION && git commit -am "Release 0.2.0"
+git tag v0.2.0 && git push origin main v0.2.0
+```
+
+The workflow then creates a **draft** release with all packages and `SHA256SUMS`.
+Check it and click Publish. The tag must match `VERSION`.
+
+To test the Linux packaging locally with Docker:
+
+```sh
+WORKTREE=1 packaging/make-source-tarball.sh 0.1.0 /tmp/dist
+docker run --rm -v "$PWD:/repo:ro" -v /tmp/dist:/dist:ro -v /tmp/out:/out -w /repo fedora:latest \
+    bash packaging/ci/build-linux-package.sh /dist/scrim-0.1.0.tar.gz /out
+```
+
+**Signed macOS builds (optional):** add the repository secrets `MACOS_CERTIFICATE_P12`
+(base64 of a Developer ID Application certificate), `MACOS_CERTIFICATE_PASSWORD`, and for
+notarization `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`. The workflow then signs
+with the hardened runtime, notarizes and staples the `.dmg`. Without them, builds are
+ad-hoc signed.
 
 ## Measured cost
 

@@ -115,6 +115,9 @@ def compile_effect(effect_dir: Path) -> None:
              "--output", str(msl), str(spv)])
         run(["spirv-cross", "--es", "--version", "300", "--output", str(gles), str(spv)])
         print(f"  {effect_dir.name}/{p['shader']} -> build/{stem}.{{glsl,spv,metal,gles}}")
+    # Lets builds skip recompiling when nothing changed (and work without the shader
+    # tools, e.g. from a release tarball that already contains build/).
+    (build / ".stamp").write_text("")
 
 
 def main(argv: list) -> int:
