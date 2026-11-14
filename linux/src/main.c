@@ -73,6 +73,7 @@ static void usage(FILE *f) {
         "  -c, --config PATH          config file (default ~/.config/scrim/scrim.conf)\n"
         "      --backend wayland|x11  force a display backend\n"
         "  -l, --list                 list effects and their parameters\n"
+        "      --print-wallpaper      show which wallpaper Scrim detects, and from where\n"
         "      --stats                print frame rate and memory every 5 s\n"
         "      --duration SECONDS     quit after this long (for testing)\n"
         "      --snapshot PATH.png    render one frame offscreen, without a display, and exit\n"
@@ -101,7 +102,7 @@ static bool parse_cli(int argc, char **argv, cli_options *o) {
         {"list", no_argument, 0, 'l'}, {"stats", no_argument, 0, 's'},
         {"duration", required_argument, 0, 'd'}, {"help", no_argument, 0, 'h'},
         {"snapshot", required_argument, 0, 'S'}, {"time", required_argument, 0, 'T'},
-        {"size", required_argument, 0, 'Z'}, {0, 0, 0, 0},
+        {"size", required_argument, 0, 'Z'}, {"print-wallpaper", no_argument, 0, 'W'}, {0, 0, 0, 0},
     };
     int c;
     while ((c = getopt_long(argc, argv, "e:p:f:w:c:lh", longopts, NULL)) != -1) {
@@ -123,6 +124,14 @@ static bool parse_cli(int argc, char **argv, cli_options *o) {
         case 'c': snprintf(o->config_path, sizeof o->config_path, "%s", optarg); break;
         case 'b': o->backend = optarg; break;
         case 'l': rp_effect_print_all(); exit(0);
+        case 'W': {
+            char wp[PATH_MAX];
+            const char *source = NULL;
+            rp_wallpaper_detect(wp, sizeof wp, &source);
+            if (!wp[0]) { printf("no wallpaper detected; set `wallpaper =` in the config file\n"); exit(1); }
+            printf("%s (from %s)\n", wp, source);
+            exit(0);
+        }
         case 's': o->stats = true; break;
         case 'd': o->duration = atof(optarg); break;
         case 'S': o->snapshot = optarg; break;
@@ -150,6 +159,7 @@ static float params[RP_MAX_PARAMS];
 static rp_texture wallpaper;
 static char wallpaper_loaded[PATH_MAX] = "\x01";   // forces the first load
 static int wallpaper_side;
+static struct timespec wallpaper_mtime;
 static const rp_backend *backend;
 static int timer_fd = -1;
 static bool outputs_ready;
@@ -209,7 +219,8 @@ static void write_template(const char *path) {
         "# Run `scrim --list` to see every effect and its parameters.\n\n"
         "# effect = rain\n# fps = 30\n# hidpi = false\n# pause_on_battery = true\n"
         "# paused = false   (also: `scrim msg pause|resume|toggle`, or kill -USR1)\n"
-        "# wallpaper = ~/Pictures/your-image.jpg   (default: GNOME's setting, if any)\n\n");
+        "# wallpaper = ~/Pictures/your-image.jpg   (default: detected from your desktop,\n"
+        "#             see `scrim --print-wallpaper`)\n\n");
     if (effect.nparams) {
         fprintf(f, "# [%s]\n", effect.id);
         for (int i = 0; i < effect.nparams; i++) {
@@ -265,6 +276,38 @@ static void merge_settings(rp_config *next) {
         rp_config_set_value(next, runtime.values[i].section, runtime.values[i].key, runtime.values[i].value);
 }
 
+// (Re)loads the wallpaper when its path, the file itself, or the largest output size
+// changed. Detection runs again each time unless `wallpaper =` is set.
+static void refresh_wallpaper(void) {
+    char wp[PATH_MAX], cfg_path[PATH_MAX];
+    const char *source = NULL;
+    if (cfg.wallpaper[0]) snprintf(wp, sizeof wp, "%s", cfg.wallpaper);
+    else rp_wallpaper_detect(wp, sizeof wp, &source);
+    struct stat st;
+    struct timespec mtime = {0};
+    if (wp[0] && stat(wp, &st) == 0) mtime = st.st_mtim;
+    int side = max_output_side();
+    if (!strcmp(wp, wallpaper_loaded) && side == wallpaper_side &&
+        mtime.tv_sec == wallpaper_mtime.tv_sec && mtime.tv_nsec == wallpaper_mtime.tv_nsec) return;
+
+    make_current_any();
+    rp_wallpaper_release(&wallpaper);
+    bool ok = rp_wallpaper_load(&wallpaper, wp, side);
+    if (ok) rp_log("wallpaper: %s%s%s%s (%dx%d)", wp, source ? " (from " : "", source ? source : "",
+                   source ? ")" : "", wallpaper.width, wallpaper.height);
+    if (!ok && !wp[0]) {
+        config_file_path(cfg_path, sizeof cfg_path);
+        rp_log("no wallpaper found: add `wallpaper = /path/to/image.jpg` to %s", cfg_path);
+    }
+    snprintf(wallpaper_loaded, sizeof wallpaper_loaded, "%s", wp);
+    wallpaper_side = side;
+    wallpaper_mtime = mtime;
+    for (int i = 0; i < backend->count(); i++) {
+        rp_output *o = backend->output(i);
+        if (o) o->needs_redraw = true;   // show it even while paused
+    }
+}
+
 // Applies merged settings: effect, params, wallpaper, frame rate.
 static bool apply_settings(bool first) {
     char path[PATH_MAX], err[1024];
@@ -293,18 +336,7 @@ static bool apply_settings(bool first) {
     if (first && access(path, F_OK) != 0 && !cli.config_path[0]) write_template(path);
 
     if (!outputs_ready) return true;   // the wallpaper is decoded at the outputs' size
-    char wp[PATH_MAX];
-    if (cfg.wallpaper[0]) snprintf(wp, sizeof wp, "%s", cfg.wallpaper);
-    else rp_wallpaper_detect(wp, sizeof wp);
-    int side = max_output_side();
-    if (strcmp(wp, wallpaper_loaded) != 0 || side != wallpaper_side) {
-        rp_wallpaper_release(&wallpaper);
-        if (!rp_wallpaper_load(&wallpaper, wp, side) && !wp[0])
-            rp_log("no wallpaper set: add `wallpaper = /path/to/image.jpg` to %s", path);
-        snprintf(wallpaper_loaded, sizeof wallpaper_loaded, "%s", wp);
-        wallpaper_side = side;
-    }
-
+    refresh_wallpaper();
     for (int i = 0; i < backend->count(); i++) {
         rp_output *o = backend->output(i);
         if (o) o->needs_redraw = true;
@@ -510,7 +542,7 @@ int main(int argc, char **argv) {
     sigprocmask(SIG_BLOCK, &mask, NULL);
     int sig_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
 
-    double start = now_seconds(), last = start, stats_at = start + 5, battery_at = 0;
+    double start = now_seconds(), last = start, stats_at = start + 5, battery_at = 0, wallpaper_at = start + 10;
     double time = 0, frame = 0;
     bool was_paused = false;
     const char *pause_reason = "";
@@ -559,6 +591,12 @@ int main(int argc, char **argv) {
 
         double now = now_seconds();
         if (now >= battery_at) { on_battery = rp_on_battery(); battery_at = now + 5; }
+        // Follow the wallpaper: a changed setting in the desktop, an edited file, or
+        // (checked every tick, it's cheap) a bigger output after a monitor change.
+        if (now >= wallpaper_at || max_output_side() != wallpaper_side) {
+            refresh_wallpaper();
+            wallpaper_at = now + 10;
+        }
         const char *reason = user_paused() ? "paused" : cfg.pause_on_battery && on_battery ? "on battery: paused" : "";
         bool paused = reason[0] != 0;
         if (strcmp(reason, pause_reason) != 0) {

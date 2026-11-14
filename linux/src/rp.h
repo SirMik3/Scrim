@@ -95,8 +95,9 @@ GLuint rp_compile_program(const char *fragment_source, char *err, size_t errlen)
 // full mip chain. Falls back to a dark gradient (returns false) when unreadable.
 bool rp_wallpaper_load(rp_texture *out, const char *path, int max_side);
 void rp_wallpaper_release(rp_texture *t);
-// Best-effort detection of the desktop's own wallpaper (GNOME gsettings). Empty if none.
-void rp_wallpaper_detect(char *out, size_t len);
+// Detects the desktop's own wallpaper (swww, hyprpaper, swaybg, KDE, XFCE, gsettings,
+// feh, nitrogen; see detect.c). Empty if none; *source names where it came from.
+void rp_wallpaper_detect(char *out, size_t len, const char **source);
 
 // ---- config (config.c) -----------------------------------------------------
 

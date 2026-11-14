@@ -98,7 +98,7 @@ you save the file**:
 effect = rain
 fps = 30
 pause_on_battery = true
-wallpaper = ~/Pictures/lake.jpg     # JPEG or PNG; defaults to GNOME's setting if any
+wallpaper = ~/Pictures/lake.jpg     # JPEG or PNG; detected from your desktop if unset
 
 [rain]
 fog = 0.4
@@ -109,6 +109,12 @@ darken = 0.5
 the command-line options, which override the file. On Wayland, rendering stops by itself
 when the compositor stops asking for frames: the output is covered, off or locked.
 It also pauses on battery, which is read from `/sys/class/power_supply`.
+
+Without `wallpaper =`, Scrim draws over the wallpaper your desktop shows. It reads it
+from swww, hyprpaper, swaybg (including Sway's `output * bg`), KDE Plasma, XFCE,
+GNOME/Cinnamon/Budgie/MATE, `~/.fehbg` or nitrogen, and checks again every 10 seconds,
+so changing your wallpaper (or editing the image) carries over. `scrim --print-wallpaper`
+shows what it found and where.
 
 ### Controlling a running Scrim
 
@@ -137,8 +143,7 @@ that same setting. `paused = true` in the file pauses too. Only one Scrim runs p
 user: a second one exits straight away (with status 0, so a systemd unit doesn't
 keep retrying). The socket is `$XDG_RUNTIME_DIR/scrim.sock`.
 
-**Not done yet on Linux:** a tray icon or settings window, reading the wallpaper of
-desktops other than GNOME/Cinnamon (set `wallpaper =` instead), and formats other
+**Not done yet on Linux:** a tray icon or settings window, and image formats other
 than JPEG/PNG.
 
 ### Testing without a Linux machine
