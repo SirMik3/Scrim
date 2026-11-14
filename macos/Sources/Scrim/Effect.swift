@@ -1,10 +1,14 @@
 import Foundation
 
-/// manifest.json, as defined in spec/effect-format.md (format 1).
+/// manifest.json, as defined in spec/effect-format.md (formats 1 and 2).
 struct EffectManifest: Decodable {
     struct Pass: Decodable {
         let shader: String
         let scale: Double?
+        /// Format 2: keeps its output between frames and reads it back as `uFeedback`.
+        let persistent: Bool?
+        /// Format 2: "rgba8" (default) or "rgba16f".
+        let pixelFormat: String?
 
         var stem: String { (shader as NSString).deletingPathExtension }
     }
@@ -77,6 +81,8 @@ struct EffectError: LocalizedError {
 struct Effect {
     static let maxPasses = 8
     static let maxParams = 16
+    static let formats = [1, 2]
+    static let pixelFormats = ["rgba8", "rgba16f"]
 
     let manifest: EffectManifest
     let directory: URL
@@ -87,14 +93,26 @@ struct Effect {
     init(directory: URL) throws {
         let data = try Data(contentsOf: directory.appendingPathComponent("manifest.json"))
         let manifest = try JSONDecoder().decode(EffectManifest.self, from: data)
-        guard manifest.format == 1 else { throw EffectError(message: "unsupported format \(manifest.format)") }
+        guard Self.formats.contains(manifest.format) else {
+            throw EffectError(message: "unsupported format \(manifest.format) (a newer Scrim may be needed)")
+        }
         guard (1...Self.maxPasses).contains(manifest.passes.count) else {
             throw EffectError(message: "needs 1–\(Self.maxPasses) passes")
         }
         guard manifest.params.count <= Self.maxParams else {
             throw EffectError(message: "at most \(Self.maxParams) params")
         }
-        for pass in manifest.passes {
+        for (i, pass) in manifest.passes.enumerated() {
+            let last = i == manifest.passes.count - 1
+            if pass.persistent != nil || pass.pixelFormat != nil {
+                guard manifest.format >= 2 else {
+                    throw EffectError(message: "pass \(i): \"persistent\" and \"pixelFormat\" need format 2")
+                }
+                guard !last else { throw EffectError(message: "the last pass can't be persistent or set pixelFormat") }
+            }
+            if let f = pass.pixelFormat, !Self.pixelFormats.contains(f) {
+                throw EffectError(message: "pass \(i): pixelFormat must be rgba8 or rgba16f")
+            }
             let metal = directory.appendingPathComponent("build/\(pass.stem).metal")
             guard FileManager.default.fileExists(atPath: metal.path) else {
                 throw EffectError(message: "missing build/\(pass.stem).metal — run tools/effectc")
@@ -108,6 +126,9 @@ struct Effect {
         let stem = manifest.passes[index].stem
         return try String(contentsOf: directory.appendingPathComponent("build/\(stem).metal"), encoding: .utf8)
     }
+
+    func isPersistent(_ index: Int) -> Bool { manifest.passes[index].persistent ?? false }
+    var hasPersistentPasses: Bool { manifest.passes.indices.contains(where: isPersistent) }
 
     func scale(forPass index: Int) -> Double {
         min(max(manifest.passes[index].scale ?? 1, 0.125), 1)

@@ -12,6 +12,8 @@
 #define RP_DATADIR "/usr/local/share/scrim"
 #endif
 
+static unsigned next_generation = 1;
+
 static void copy_str(char *dst, size_t len, const char *src) {
     snprintf(dst, len, "%s", src ? src : "");
 }
@@ -54,8 +56,9 @@ bool rp_effect_load(rp_effect *e, const char *dir, char *err, size_t errlen) {
 
     bool ok = false;
     json_object *v, *passes, *params;
-    if (!json_object_object_get_ex(root, "format", &v) || json_object_get_int(v) != 1) {
-        snprintf(err, errlen, "%s: format must be 1", path); goto done;
+    int format = json_object_object_get_ex(root, "format", &v) ? json_object_get_int(v) : 0;
+    if (format != 1 && format != 2) {
+        snprintf(err, errlen, "%s: format must be 1 or 2 (a newer Scrim may be needed)", path); goto done;
     }
     const char *id = json_str(root, "id"), *name = json_str(root, "name");
     if (!id || !name) { snprintf(err, errlen, "%s: id and name are required", path); goto done; }
@@ -81,6 +84,27 @@ bool rp_effect_load(rp_effect *e, const char *dir, char *err, size_t errlen) {
         double scale = 1;
         json_num(p, "scale", &scale);
         e->passes[i].scale = scale < 0.125 ? 0.125f : scale > 1 ? 1.0f : (float)scale;
+
+        bool last = i == e->npasses - 1;
+        json_object *pv;
+        if (json_object_object_get_ex(p, "persistent", &pv)) {
+            if (format < 2 || !json_object_is_type(pv, json_type_boolean) || (last && json_object_get_boolean(pv))) {
+                snprintf(err, errlen, "%s: pass %d: \"persistent\" needs format 2, a true/false value "
+                         "and can't be on the last pass", path, i);
+                goto done;
+            }
+            e->passes[i].persistent = json_object_get_boolean(pv);
+        }
+        const char *pixel_format = json_str(p, "pixelFormat");
+        if (pixel_format) {
+            bool known = !strcmp(pixel_format, "rgba8") || !strcmp(pixel_format, "rgba16f");
+            if (format < 2 || !known || last) {
+                snprintf(err, errlen, "%s: pass %d: \"pixelFormat\" must be rgba8 or rgba16f, needs "
+                         "format 2 and can't be on the last pass", path, i);
+                goto done;
+            }
+            e->passes[i].half_float = !strcmp(pixel_format, "rgba16f");
+        }
 
         char gles[PATH_MAX + 160];
         snprintf(gles, sizeof gles, "%s/build/%s.gles", dir, e->passes[i].stem);
@@ -114,6 +138,7 @@ bool rp_effect_load(rp_effect *e, const char *dir, char *err, size_t errlen) {
             }
         }
     }
+    e->generation = next_generation++;
     ok = true;
 done:
     json_object_put(root);
@@ -177,6 +202,13 @@ static char *read_file(const char *path) {
 
 bool rp_effect_compile(rp_effect *e, char *err, size_t errlen) {
     for (int i = 0; i < e->npasses; i++) {
+        if (e->passes[i].half_float && !rp_render_half_float()) {
+            snprintf(err, errlen, "effect '%s' needs float render targets, which this GPU driver "
+                     "doesn't offer (GL_EXT_color_buffer_half_float)", e->id);
+            return false;
+        }
+    }
+    for (int i = 0; i < e->npasses; i++) {
         rp_pass *p = &e->passes[i];
         char path[PATH_MAX + 160];
         snprintf(path, sizeof path, "%s/build/%s.gles", e->dir, p->stem);
@@ -192,9 +224,11 @@ bool rp_effect_compile(rp_effect *e, char *err, size_t errlen) {
         if (block != GL_INVALID_INDEX) glUniformBlockBinding(p->program, block, 0);
         p->loc_wallpaper = glGetUniformLocation(p->program, "uWallpaper");
         p->loc_previous = glGetUniformLocation(p->program, "uPrevious");
+        p->loc_feedback = glGetUniformLocation(p->program, "uFeedback");
         p->loc_flip = glGetUniformLocation(p->program, "uFlip");
         if (p->loc_wallpaper >= 0) glUniform1i(p->loc_wallpaper, 1);
         if (p->loc_previous >= 0) glUniform1i(p->loc_previous, 2);
+        if (p->loc_feedback >= 0) glUniform1i(p->loc_feedback, 3);
     }
     e->compiled = true;
     return true;

@@ -118,7 +118,10 @@ than JPEG/PNG.
 
 `linux/test/docker-test.sh [wallpaper.jpg] [effect]` builds the app in a Debian
 container, then runs it under Xvfb (X11) and a headless Sway (Wayland) with Mesa's
-software renderer. Screenshots of each go to `linux/test/out/`.
+software renderer. Screenshots of each go to `linux/test/out/`. It also renders
+offscreen snapshots and checks them: `linux/test/effects/feedback-test` (a test-only
+effect) verifies persistent passes, and repeated snapshots must be identical.
+Set `BACKENDS` to any of `snapshot x11 wayland` to run only some of these.
 
 ## Developing effects
 
@@ -127,12 +130,17 @@ tools/effectc effects/rain                        # after editing a .frag
 macos/build/Scrim.app/Contents/MacOS/Scrim \
     --snapshot out.png --effect rain --time 12 --size 1728x1117 \
     --param drops=1 --param rain=0.8              # render one frame offscreen (macOS)
+linux/build/scrim --snapshot out.png --effect rain --time 12 --size 1280x800  # Linux
 ```
 
-`--snapshot` also prints the median GPU time per frame and the memory footprint.
+`--snapshot` also prints the median time per frame and the memory use. On Linux it
+needs no display server (it uses headless EGL), so it works over SSH and in CI.
+Effects with persistent passes are simulated from 0 up to `--time` in steps of
+1/fps (1/30 s on macOS), so snapshots are reproducible.
 User effects go in `~/Library/Application Support/Scrim/Effects/` (macOS) or
 `~/.local/share/scrim/effects/` (Linux). You can also point `SCRIM_EFFECTS_DIR`
-at a folder. Read the portability rules in the spec. In particular, never call
+at a folder. Read the portability rules in the spec. Format 2 adds *persistent passes*, which
+read their own output from the previous frame; `effects/condensation` is a small example. In particular, never call
 `smoothstep` with its edges reversed: Metal tolerates it, Mesa doesn't.
 
 macOS: `SCRIM_DEBUG=1` logs the frame rate, pause reasons and memory every 5 s.

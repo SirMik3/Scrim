@@ -1,0 +1,12 @@
+{
+  "format": 2,
+  "id": "feedback-test",
+  "name": "Persistent-pass self-test",
+  "version": "0.1.0",
+  "license": "MIT",
+  "passes": [
+    { "shader": "state.frag", "scale": 0.5, "persistent": true, "pixelFormat": "rgba16f" },
+    { "shader": "show.frag" }
+  ],
+  "params": []
+}

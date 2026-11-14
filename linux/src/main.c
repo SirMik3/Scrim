@@ -56,6 +56,9 @@ typedef struct {
     const char *backend;
     bool stats;
     double duration;
+    const char *snapshot;               // --snapshot PATH: render offscreen and exit
+    double time;                        // --time (snapshot)
+    int width, height;                  // --size (snapshot)
 } cli_options;
 
 static void usage(FILE *f) {
@@ -72,19 +75,29 @@ static void usage(FILE *f) {
         "  -l, --list                 list effects and their parameters\n"
         "      --stats                print frame rate and memory every 5 s\n"
         "      --duration SECONDS     quit after this long (for testing)\n"
+        "      --snapshot PATH.png    render one frame offscreen, without a display, and exit\n"
+        "      --time SECONDS         (snapshot) time to render; persistent effects are\n"
+        "                             simulated up to it in steps of 1/fps (default 10)\n"
+        "      --size WxH             (snapshot) image size (default 1280x800)\n"
+        "A snapshot uses the effect's defaults plus --param, not the config file.\n"
         "The config file is reloaded whenever it is saved. Command-line options win over it.\n");
 }
 
 static bool parse_cli(int argc, char **argv, cli_options *o) {
     memset(o, 0, sizeof *o);
     o->fps = o->hidpi = o->pause_on_battery = -1;
+    o->time = 10;
+    o->width = 1280;
+    o->height = 800;
     static const struct option longopts[] = {
         {"effect", required_argument, 0, 'e'}, {"param", required_argument, 0, 'p'},
         {"fps", required_argument, 0, 'f'}, {"wallpaper", required_argument, 0, 'w'},
         {"hidpi", no_argument, 0, 'H'}, {"no-pause-on-battery", no_argument, 0, 'B'},
         {"config", required_argument, 0, 'c'}, {"backend", required_argument, 0, 'b'},
         {"list", no_argument, 0, 'l'}, {"stats", no_argument, 0, 's'},
-        {"duration", required_argument, 0, 'd'}, {"help", no_argument, 0, 'h'}, {0, 0, 0, 0},
+        {"duration", required_argument, 0, 'd'}, {"help", no_argument, 0, 'h'},
+        {"snapshot", required_argument, 0, 'S'}, {"time", required_argument, 0, 'T'},
+        {"size", required_argument, 0, 'Z'}, {0, 0, 0, 0},
     };
     int c;
     while ((c = getopt_long(argc, argv, "e:p:f:w:c:lh", longopts, NULL)) != -1) {
@@ -108,6 +121,15 @@ static bool parse_cli(int argc, char **argv, cli_options *o) {
         case 'l': rp_effect_print_all(); exit(0);
         case 's': o->stats = true; break;
         case 'd': o->duration = atof(optarg); break;
+        case 'S': o->snapshot = optarg; break;
+        case 'T': o->time = atof(optarg); break;
+        case 'Z':
+            if (sscanf(optarg, "%dx%d", &o->width, &o->height) != 2 || o->width < 1 || o->height < 1 ||
+                o->width > 16384 || o->height > 16384) {
+                rp_log("--size expects WIDTHxHEIGHT, e.g. 1728x1117");
+                return false;
+            }
+            break;
         case 'h': usage(stdout); exit(0);
         default: usage(stderr); return false;
         }
@@ -257,8 +279,8 @@ static bool apply_settings(bool first) {
 
 // ---- EGL ---------------------------------------------------------------------
 
-static bool init_egl(char *err, size_t errlen) {
-    rp_egl_display = backend->egl_display();
+bool rp_egl_init(EGLDisplay display, bool windows, const char *via, char *err, size_t errlen) {
+    rp_egl_display = display;
     EGLint major, minor;
     if (rp_egl_display == EGL_NO_DISPLAY || !eglInitialize(rp_egl_display, &major, &minor)) {
         snprintf(err, errlen, "EGL initialisation failed (0x%x)", eglGetError());
@@ -271,7 +293,7 @@ static bool init_egl(char *err, size_t errlen) {
     }
     eglBindAPI(EGL_OPENGL_ES_API);
     const EGLint attrs[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_SURFACE_TYPE, windows ? EGL_WINDOW_BIT : 0, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 0, EGL_NONE,
     };
     EGLint n = 0;
@@ -286,11 +308,11 @@ static bool init_egl(char *err, size_t errlen) {
         return false;
     }
     make_current_any();
-    rp_log("%s via %s, EGL %d.%d", (const char *)glGetString(GL_RENDERER), backend->name, major, minor);
+    rp_log("%s via %s, EGL %d.%d", (const char *)glGetString(GL_RENDERER), via, major, minor);
     return true;
 }
 
-static long rss_kb(void) {
+long rp_rss_kb(void) {
     FILE *f = fopen("/proc/self/status", "r");
     if (!f) return -1;
     char line[256];
@@ -305,6 +327,14 @@ static long rss_kb(void) {
 
 int main(int argc, char **argv) {
     if (!parse_cli(argc, argv, &cli)) return 2;
+    if (cli.snapshot) {
+        rp_snapshot_options so = {
+            .path = cli.snapshot, .effect = cli.effect[0] ? cli.effect : "rain",
+            .wallpaper = cli.wallpaper, .time = cli.time, .fps = cli.fps > 0 ? cli.fps : 30,
+            .width = cli.width, .height = cli.height, .nvalues = cli.nvalues, .values = cli.values,
+        };
+        return rp_snapshot_run(&so);
+    }
 
     char err[1024] = "";
     rp_config early;
@@ -320,7 +350,11 @@ int main(int argc, char **argv) {
         if (!backend->init(early.hidpi, err, sizeof err)) { rp_log("x11: %s", err); return 1; }
         rp_log("falling back to X11 — the effect may sit above the desktop's own wallpaper window");
     }
-    if (!init_egl(err, sizeof err) || !rp_render_init(err, sizeof err)) { rp_log("%s", err); return 1; }
+    if (!rp_egl_init(backend->egl_display(), true, backend->name, err, sizeof err) ||
+        !rp_render_init(err, sizeof err)) {
+        rp_log("%s", err);
+        return 1;
+    }
 
     timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (!apply_settings(true)) return 1;   // compiles the effect
@@ -412,7 +446,7 @@ int main(int argc, char **argv) {
                 advanced = true;
             }
             rp_render_frame(&effect, &o->targets, &wallpaper, params, time, frame, delta,
-                            o->render_w, o->render_h);
+                            !paused, 0, o->render_w, o->render_h);
             backend->before_swap(o);
             eglSwapBuffers(rp_egl_display, o->egl_surface);
             o->needs_redraw = false;
@@ -421,7 +455,7 @@ int main(int argc, char **argv) {
 
         if (cli.stats && now >= stats_at) {
             rp_log("stats: %.1f frames/s (all outputs)%s, RSS %ld MB",
-                   frames_drawn / (now - stats_at + 5), paused ? ", paused" : "", rss_kb() / 1024);
+                   frames_drawn / (now - stats_at + 5), paused ? ", paused" : "", rp_rss_kb() / 1024);
             frames_drawn = 0;
             stats_at = now + 5;
         }

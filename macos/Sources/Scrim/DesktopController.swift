@@ -277,6 +277,7 @@ final class DesktopController {
             let paused = global || hidden
             if slot.driver.isPaused != paused {
                 slot.driver.isPaused = paused
+                slot.renderer.holdState = paused
                 if paused {
                     // Leave a still frame up rather than whatever the window held before.
                     if !hidden { slot.view.draw() }

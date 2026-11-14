@@ -8,6 +8,8 @@ final class GPU {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let sampler: MTLSamplerState
+    /// Bound as `uFeedback` for passes that aren't persistent.
+    let blackTexture: MTLTexture
     private let vertexFunction: MTLFunction
     private var cache: [String: CompiledEffect] = [:]
 
@@ -49,9 +51,22 @@ final class GPU {
         guard let sampler = device.makeSamplerState(descriptor: sd) else { throw EffectError(message: "No sampler") }
         self.sampler = sampler
 
+        let bd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: Self.pixelFormat, width: 1, height: 1, mipmapped: false)
+        bd.usage = .shaderRead
+        guard let black = device.makeTexture(descriptor: bd) else { throw EffectError(message: "No texture") }
+        var zero: UInt32 = 0
+        black.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zero, bytesPerRow: 4)
+        blackTexture = black
+
         let lib = try device.makeLibrary(source: Self.vertexSource, options: nil)
         guard let vfn = lib.makeFunction(name: "rp_fullscreen") else { throw EffectError(message: "No vertex function") }
         vertexFunction = vfn
+    }
+
+    /// The texture format a pass renders into. The last pass draws to the screen.
+    static func targetFormat(_ effect: Effect, pass index: Int) -> MTLPixelFormat {
+        let last = index == effect.manifest.passes.count - 1
+        return !last && effect.manifest.passes[index].pixelFormat == "rgba16f" ? .rgba16Float : pixelFormat
     }
 
     func compiled(_ effect: Effect) throws -> CompiledEffect {
@@ -74,7 +89,7 @@ final class GPU {
             pd.label = "\(effect.id).\(effect.manifest.passes[i].stem)"
             pd.vertexFunction = vertexFunction
             pd.fragmentFunction = fn
-            pd.colorAttachments[0].pixelFormat = Self.pixelFormat
+            pd.colorAttachments[0].pixelFormat = Self.targetFormat(effect, pass: i)
             pipelines.append(try device.makeRenderPipelineState(descriptor: pd))
         }
         let result = CompiledEffect(effect: effect, pipelines: pipelines)
