@@ -1,6 +1,6 @@
 # Builds on Fedora and openSUSE. Version comes from the release tarball:
 #   rpmbuild -ba scrim.spec --define "scrim_version 0.1.0"
-%{!?scrim_version: %global scrim_version 0.1.0}
+%{!?scrim_version: %global scrim_version 0.2.0}
 
 Name:           scrim
 Version:        %{scrim_version}
