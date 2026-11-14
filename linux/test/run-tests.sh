@@ -14,7 +14,21 @@ cp -r /src/linux/test/effects/. /tmp/effects/      # test-only effects (never pa
 for d in /tmp/effects/*/; do /src/tools/effectc "$d" >/dev/null; done
 BIN=/tmp/build/build/scrim
 ARGS=(--effect "$EFFECT" --wallpaper "$WALLPAPER" --no-pause-on-battery --stats --duration 12 ${EXTRA_ARGS:-})
-BACKENDS=${BACKENDS:-"x11 wayland"}
+BACKENDS=${BACKENDS:-"snapshot x11 wayland"}
+
+if [[ $BACKENDS == *snapshot* ]]; then
+echo "== Snapshots (headless EGL) =="
+SNAP=(--wallpaper "$WALLPAPER" --size 640x400 --time 10)
+# Persistent passes: the self-test must find no bad state, and its line must sit at
+# 10 s * 0.06 = 0.6, which proves uStepDelta adds up exactly over 301 fixed steps.
+$BIN --snapshot /out/snapshot-feedback-test.png --effect feedback-test "${SNAP[@]}"
+convert /out/snapshot-feedback-test.png -depth 8 rgb:- | python3 /src/linux/test/check-feedback.py 640 400 0.6
+# Snapshots must be deterministic.
+$BIN --snapshot /out/snapshot-condensation.png --effect condensation "${SNAP[@]}"
+$BIN --snapshot /tmp/again.png --effect condensation "${SNAP[@]}" >/dev/null
+cmp /out/snapshot-condensation.png /tmp/again.png && echo "condensation: deterministic"
+$BIN --snapshot "/out/snapshot-$EFFECT.png" --effect "$EFFECT" "${SNAP[@]}"
+fi
 
 if [[ $BACKENDS == *x11* ]]; then
 echo "== X11 (Xvfb) =="

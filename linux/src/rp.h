@@ -80,9 +80,10 @@ bool rp_render_init(char *err, size_t errlen);          // UBO, VAO; needs a con
 bool rp_render_half_float(void);
 // `step`: advance persistent passes. False when redrawing without new time (paused);
 // the last state is then reused. The first frame after a reset always steps.
+// `target`: framebuffer for the last pass (0 = the current window surface).
 void rp_render_frame(const rp_effect *e, rp_targets *t, const rp_texture *wallpaper,
                      const float *params, double time, double frame, double delta,
-                     bool step, int width, int height);
+                     bool step, GLuint target, int width, int height);
 void rp_targets_release(rp_targets *t);
 GLuint rp_compile_program(const char *fragment_source, char *err, size_t errlen);
 
@@ -161,4 +162,21 @@ extern EGLDisplay rp_egl_display;
 extern EGLConfig rp_egl_config;
 extern EGLContext rp_egl_context;
 EGLSurface rp_egl_create_surface(void *native_window);
+// Initialises EGL on `display` and makes an OpenGL ES 3 context current without a
+// surface. `windows`: the config must support window surfaces.
+bool rp_egl_init(EGLDisplay display, bool windows, const char *via, char *err, size_t errlen);
+
+// ---- snapshot (snapshot.c) -------------------------------------------------
+
+typedef struct {
+    const char *path, *effect, *wallpaper;
+    double time;
+    int fps, width, height;
+    int nvalues;
+    char (*values)[2][64];      // "id", "value" overrides
+} rp_snapshot_options;
+
+// Renders one frame offscreen with headless EGL and writes it as PNG. Returns an exit code.
+int rp_snapshot_run(const rp_snapshot_options *o);
 void rp_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+long rp_rss_kb(void);   // resident memory in kB, -1 if unknown

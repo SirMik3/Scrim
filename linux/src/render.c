@@ -156,7 +156,7 @@ static void ensure_targets(const rp_effect *e, rp_targets *t, int width, int hei
 
 void rp_render_frame(const rp_effect *e, rp_targets *t, const rp_texture *wallpaper,
                      const float *params, double time, double frame, double delta,
-                     bool step, int width, int height) {
+                     bool step, GLuint target, int width, int height) {
     ensure_targets(e, t, width, height);
     bool reset = t->steps == 0;
     if (reset) step = true;   // persistent passes need their initial state
@@ -192,7 +192,7 @@ void rp_render_frame(const rp_effect *e, rp_targets *t, const rp_texture *wallpa
         }
         int w = last ? width : t->tw[i], h = last ? height : t->th[i];
         int slot = p->persistent ? write : 0;
-        glBindFramebuffer(GL_FRAMEBUFFER, last ? 0 : t->fbo[i][slot]);
+        glBindFramebuffer(GL_FRAMEBUFFER, last ? target : t->fbo[i][slot]);
         glViewport(0, 0, w, h);
 
         b.res[0] = (float)w; b.res[1] = (float)h;
