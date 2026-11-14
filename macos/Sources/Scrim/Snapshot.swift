@@ -4,6 +4,8 @@ import Metal
 import UniformTypeIdentifiers
 
 /// Renders one frame of an effect offscreen to a PNG — for effect authoring and testing.
+/// Effects with persistent passes are simulated from t = 0 up to --time in steps of
+/// 1/30 s, as the Linux app does, so the result is reproducible.
 ///
 ///   Scrim --snapshot out.png [--effect rain] [--time 12.5] [--size 1728x1117]
 ///             [--wallpaper image.jpg] [--param id=value ...]
@@ -53,7 +55,9 @@ enum Snapshot {
             renderer.setParams(effect.manifest.params.map {
                 Float(overrides[$0.id] ?? $0.defaultValue)
             })
-            renderer.setTime(time)
+            let dt = 1.0 / 30
+            let persistent = effect.hasPersistentPasses
+            let steps = persistent ? Int((time / dt).rounded()) : 0
 
             let td = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: GPU.pixelFormat, width: Int(size.width), height: Int(size.height), mipmapped: false)
@@ -62,7 +66,10 @@ enum Snapshot {
             guard let target = gpu.device.makeTexture(descriptor: td),
                   let cmd = gpu.queue.makeCommandBuffer() else { return fail("could not allocate GPU resources") }
 
-            renderer.encode(into: cmd, finalTarget: target, delta: 1.0 / 30)
+            for k in 0...steps {
+                renderer.setTime(persistent ? Double(k) * dt : time)
+                renderer.encode(into: cmd, finalTarget: target, delta: dt)
+            }
             if let blit = cmd.makeBlitCommandEncoder() {
                 blit.synchronize(resource: target)
                 blit.endEncoding()
@@ -75,15 +82,16 @@ enum Snapshot {
             let wallMs = (CACurrentMediaTime() - start) * 1000
 
             try writePNG(target, to: URL(fileURLWithPath: out))
-            print(String(format: "wrote %@ (%dx%d, gpu %.2f ms, wall %.2f ms, first frame incl. setup)",
-                         out, target.width, target.height, gpuMs, wallMs))
+            let what = persistent ? "\(steps + 1) steps of 1/30 s" : "first frame"
+            print(String(format: "wrote %@ (%dx%d, gpu %.2f ms, wall %.2f ms, %@ incl. setup)",
+                         out, target.width, target.height, gpuMs, wallMs, what))
 
             // Steady-state cost: render more frames and report the median GPU time and memory.
             var times: [Double] = []
             for i in 0..<60 {
                 guard let c = gpu.queue.makeCommandBuffer() else { break }
-                renderer.setTime(time + Double(i) / 30)
-                renderer.encode(into: c, finalTarget: target, delta: 1.0 / 30)
+                renderer.setTime(persistent ? Double(steps + 1 + i) * dt : time + Double(i) * dt)
+                renderer.encode(into: c, finalTarget: target, delta: dt)
                 c.commit()
                 c.waitUntilCompleted()
                 times.append((c.gpuEndTime - c.gpuStartTime) * 1000)

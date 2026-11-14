@@ -136,7 +136,7 @@ linux/build/scrim --snapshot out.png --effect rain --time 12 --size 1280x800  # 
 `--snapshot` also prints the median time per frame and the memory use. On Linux it
 needs no display server (it uses headless EGL), so it works over SSH and in CI.
 Effects with persistent passes are simulated from 0 up to `--time` in steps of
-1/fps, so snapshots are reproducible. (macOS doesn't run persistent effects yet.)
+1/fps (1/30 s on macOS), so snapshots are reproducible.
 User effects go in `~/Library/Application Support/Scrim/Effects/` (macOS) or
 `~/.local/share/scrim/effects/` (Linux). You can also point `SCRIM_EFFECTS_DIR`
 at a folder. Read the portability rules in the spec. Format 2 adds *persistent passes*, which
