@@ -1,4 +1,5 @@
-// Wallpaper loading: JPEG (libjpeg, decoded at reduced size) and PNG (libpng),
+// Wallpaper loading: JPEG (libjpeg, decoded at reduced size), PNG (libpng) and WebP
+// (libwebp, decoded at the target size), recognised by their first bytes and
 // box-downscaled so the longest side is at most the render size, uploaded with mips.
 #include "rp.h"
 
@@ -7,6 +8,7 @@
 #include <jpeglib.h>
 #include <png.h>
 #include <setjmp.h>
+#include <webp/decode.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,7 +102,66 @@ static bool load_png(const char *path, image *out) {
     return true;
 }
 
+// ---- WebP ----
+
+static bool load_webp(const char *path, int max_side, image *out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *data = size > 0 ? malloc((size_t)size) : NULL;
+    bool read_ok = data && fread(data, 1, (size_t)size, f) == (size_t)size;
+    fclose(f);
+    WebPDecoderConfig config;
+    if (!read_ok || !WebPInitDecoderConfig(&config) || WebPGetFeatures(data, (size_t)size, &config.input) != VP8_STATUS_OK) {
+        free(data);
+        return false;
+    }
+    // Let libwebp scale while decoding, so a huge image never needs a full-size buffer.
+    int w = config.input.width, h = config.input.height, longest = w > h ? w : h;
+    if (longest > max_side) {
+        config.options.use_scaling = 1;
+        config.options.scaled_width = (int)((double)w * max_side / longest + 0.5);
+        config.options.scaled_height = (int)((double)h * max_side / longest + 0.5);
+        if (config.options.scaled_width < 1) config.options.scaled_width = 1;
+        if (config.options.scaled_height < 1) config.options.scaled_height = 1;
+        w = config.options.scaled_width;
+        h = config.options.scaled_height;
+    }
+    config.output.colorspace = MODE_RGBA;   // top row first, as upload() expects
+    bool ok = WebPDecode(data, (size_t)size, &config) == VP8_STATUS_OK;
+    free(data);
+    if (!ok) return false;
+    // Copy out of libwebp's buffer so the caller can free() it like the others.
+    out->rgba = malloc((size_t)w * h * 4);
+    if (out->rgba) {
+        for (int y = 0; y < h; y++)
+            memcpy(out->rgba + (size_t)y * w * 4, config.output.u.RGBA.rgba + (size_t)y * config.output.u.RGBA.stride,
+                   (size_t)w * 4);
+        out->width = w;
+        out->height = h;
+    }
+    WebPFreeDecBuffer(&config.output);
+    return out->rgba != NULL;
+}
+
 // ---- helpers ----
+
+typedef enum { FORMAT_UNKNOWN, FORMAT_JPEG, FORMAT_PNG, FORMAT_WEBP } image_format;
+
+// Recognises an image by its first bytes, whatever its name says.
+static image_format sniff(const char *path) {
+    unsigned char m[12] = {0};
+    FILE *f = fopen(path, "rb");
+    if (!f) return FORMAT_UNKNOWN;
+    size_t n = fread(m, 1, sizeof m, f);
+    fclose(f);
+    if (n >= 3 && m[0] == 0xFF && m[1] == 0xD8 && m[2] == 0xFF) return FORMAT_JPEG;
+    if (n >= 8 && !memcmp(m, "\x89PNG\r\n\x1a\n", 8)) return FORMAT_PNG;
+    if (n >= 12 && !memcmp(m, "RIFF", 4) && !memcmp(m + 8, "WEBP", 4)) return FORMAT_WEBP;
+    return FORMAT_UNKNOWN;
+}
 
 // Area-average downscale so the longest side is at most max_side.
 static void downscale(image *im, int max_side) {
@@ -135,14 +196,6 @@ static void downscale(image *im, int max_side) {
     im->height = dh;
 }
 
-static bool has_suffix(const char *s, const char *suffix) {
-    size_t ls = strlen(s), lx = strlen(suffix);
-    if (lx > ls) return false;
-    for (size_t i = 0; i < lx; i++)
-        if (tolower((unsigned char)s[ls - lx + i]) != suffix[i]) return false;
-    return true;
-}
-
 static void upload(rp_texture *t, const image *im) {
     int levels = 1;
     for (int s = im->width > im->height ? im->width : im->height; s > 1; s >>= 1) levels++;
@@ -167,9 +220,13 @@ bool rp_wallpaper_load(rp_texture *out, const char *path, int max_side) {
     image im = {0};
     bool ok = false;
     if (path && *path) {
-        if (has_suffix(path, ".png")) ok = load_png(path, &im);
-        else ok = load_jpeg(path, max_side, &im) || load_png(path, &im);
-        if (!ok) rp_log("cannot read wallpaper %s (JPEG and PNG are supported)", path);
+        switch (sniff(path)) {
+        case FORMAT_JPEG: ok = load_jpeg(path, max_side, &im); break;
+        case FORMAT_PNG: ok = load_png(path, &im); break;
+        case FORMAT_WEBP: ok = load_webp(path, max_side, &im); break;
+        case FORMAT_UNKNOWN: break;
+        }
+        if (!ok) rp_log("cannot read wallpaper %s (JPEG, PNG and WebP are supported)", path);
     }
     if (ok) {
         downscale(&im, max_side);
@@ -194,41 +251,4 @@ bool rp_wallpaper_load(rp_texture *out, const char *path, int max_side) {
 void rp_wallpaper_release(rp_texture *t) {
     if (t->tex) glDeleteTextures(1, &t->tex);
     memset(t, 0, sizeof *t);
-}
-
-// GNOME / Cinnamon / Budgie keep the wallpaper in gsettings as a file:// URI.
-void rp_wallpaper_detect(char *out, size_t len) {
-    out[0] = 0;
-    static const char *keys[] = {
-        "gsettings get org.gnome.desktop.background picture-uri-dark 2>/dev/null",
-        "gsettings get org.gnome.desktop.background picture-uri 2>/dev/null",
-        "gsettings get org.cinnamon.desktop.background picture-uri 2>/dev/null",
-    };
-    for (size_t i = 0; i < sizeof keys / sizeof *keys && !out[0]; i++) {
-        FILE *p = popen(keys[i], "r");
-        if (!p) continue;
-        char line[PATH_MAX + 32] = "";
-        if (fgets(line, sizeof line, p)) {
-            char *s = strstr(line, "file://");
-            if (s) {
-                s += 7;
-                char *end = strpbrk(s, "'\"\n");
-                if (end) *end = 0;
-                // Undo %-escapes (e.g. %20) in the URI.
-                char *w = s;
-                for (char *r = s; *r; r++) {
-                    if (r[0] == '%' && isxdigit((unsigned char)r[1]) && isxdigit((unsigned char)r[2])) {
-                        char hex[3] = { r[1], r[2], 0 };
-                        *w++ = (char)strtol(hex, NULL, 16);
-                        r += 2;
-                    } else {
-                        *w++ = *r;
-                    }
-                }
-                *w = 0;
-                snprintf(out, len, "%s", s);
-            }
-        }
-        pclose(p);
-    }
 }

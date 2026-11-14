@@ -5,6 +5,8 @@
 //   fps = 30
 //   hidpi = false
 //   pause_on_battery = true
+//   pause_on_power_saver = true
+//   paused = false
 //   wallpaper = ~/Pictures/lake.jpg
 //
 //   [rain]
@@ -24,6 +26,7 @@ void rp_config_defaults(rp_config *c) {
     c->fps = 30;
     c->hidpi = false;
     c->pause_on_battery = true;
+    c->pause_on_power_saver = true;
 }
 
 void rp_config_path(char *out, size_t len) {
@@ -92,6 +95,10 @@ bool rp_config_load(rp_config *c, const char *path, char *err, size_t errlen) {
             c->fps = fps < 1 ? 1 : fps > 120 ? 120 : fps;
         } else if (!strcmp(key, "hidpi")) {
             c->hidpi = parse_bool(value, c->hidpi);
+        } else if (!strcmp(key, "pause_on_power_saver")) {
+            c->pause_on_power_saver = parse_bool(value, c->pause_on_power_saver);
+        } else if (!strcmp(key, "paused")) {
+            c->paused = parse_bool(value, c->paused);
         } else if (!strcmp(key, "pause_on_battery")) {
             c->pause_on_battery = parse_bool(value, c->pause_on_battery);
         } else if (!strcmp(key, "wallpaper")) {

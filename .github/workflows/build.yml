@@ -135,6 +135,9 @@ jobs:
           [ -n "$identity" ] || { echo "::error::No Developer ID Application identity in the certificate"; exit 1; }
           echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
 
+      - name: Unit tests
+        run: macos/test.sh
+
       - name: Build universal app, .zip and .dmg
         env:
           SCRIM_VERSION: ${{ needs.source.outputs.version }}

@@ -1,12 +1,12 @@
 # Maintainer: Mike Efarov <SirMik3@users.noreply.github.com>
 pkgname=scrim
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Lightweight animated effects over your desktop wallpaper'
 arch=('x86_64' 'aarch64')
 url='https://github.com/SirMik3/Scrim'
 license=('MIT')
-depends=('wayland' 'libglvnd' 'libx11' 'libxrandr' 'libxfixes' 'json-c' 'libpng' 'libjpeg-turbo')
+depends=('wayland' 'libglvnd' 'libx11' 'libxrandr' 'libxfixes' 'libxext' 'json-c' 'libpng' 'libjpeg-turbo' 'libwebp')
 makedepends=('wayland-protocols' 'pkgconf')
 optdepends=('mesa: OpenGL ES drivers')
 source=("scrim-$pkgver.tar.gz::$url/releases/download/v$pkgver/scrim-$pkgver.tar.gz")

@@ -72,7 +72,7 @@ int rp_snapshot_run(const rp_snapshot_options *o) {
 
     char wallpaper_path[PATH_MAX];
     if (o->wallpaper && o->wallpaper[0]) snprintf(wallpaper_path, sizeof wallpaper_path, "%s", o->wallpaper);
-    else rp_wallpaper_detect(wallpaper_path, sizeof wallpaper_path);
+    else rp_wallpaper_detect(wallpaper_path, sizeof wallpaper_path, NULL);
     rp_texture wallpaper;
     int w = o->width, h = o->height;
     if (!rp_wallpaper_load(&wallpaper, wallpaper_path, w > h ? w : h))

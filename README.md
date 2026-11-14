@@ -1,7 +1,8 @@
 # Scrim
 
 A lightweight live-wallpaper app for macOS and Linux. It lays animated shader effects over
-your existing wallpaper. The first effects are rain; more are planned. The name comes from
+your existing wallpaper: Rain, Snow, Condensation (fogged glass that drops wipe clear)
+and Rain on Glass, with more planned. The name comes from
 theatre, where a scrim is a gauze backdrop that lighting effects are played onto.
 
 - **Effects** (`effects/`): portable GLSL shader passes plus a `manifest.json`. The
@@ -57,7 +58,18 @@ The menu-bar icon (a cloud) lets you:
 - turn on "Pause on Battery" and "Launch at Login"
 
 It pauses when the desktop is fully covered, when the screens sleep or lock, in Low
-Power Mode, and on battery (optional, on by default). When paused it leaves a still frame.
+Power Mode, when the Mac is running hot (thermal state "serious" or worse), and on
+battery (optional, on by default). When paused it leaves a still frame.
+
+`scrim://` links control it from the Terminal, the Shortcuts app ("Open URL"), Raycast
+and the like. Changes are saved, as if made from the menu:
+
+```sh
+open scrim://toggle                  # also: pause, resume
+open scrim://next                    # next effect
+open scrim://effect/condensation
+open "scrim://param?fog=0.8&drops=0.3"
+```
 
 `build.sh` uses `swiftc` directly, so Xcode isn't needed. If the default SDK doesn't
 match the installed Swift compiler (partly updated Command Line Tools), it falls back
@@ -74,14 +86,14 @@ Scrim falls back to X11 through XWayland, but it may end up above the desktop.
 # Debian/Ubuntu (tested on Debian 13)
 sudo apt install build-essential pkg-config python3 glslang-tools spirv-cross \
     libwayland-dev wayland-protocols libegl-dev libgles-dev libx11-dev libxrandr-dev \
-    libxfixes-dev libjson-c-dev libpng-dev libjpeg-dev
+    libxfixes-dev libxext-dev libjson-c-dev libpng-dev libjpeg-dev libwebp-dev
 # Fedora (untested)
 sudo dnf install gcc make pkgconf python3 glslang spirv-tools spirv-cross \
     wayland-devel wayland-protocols-devel mesa-libEGL-devel mesa-libGLES-devel \
-    libX11-devel libXrandr-devel libXfixes-devel json-c-devel libpng-devel libjpeg-turbo-devel
+    libX11-devel libXrandr-devel libXfixes-devel libXext-devel json-c-devel libpng-devel libjpeg-turbo-devel libwebp-devel
 # Arch (untested)
 sudo pacman -S base-devel python glslang spirv-cross wayland wayland-protocols \
-    libglvnd libx11 libxrandr libxfixes json-c libpng libjpeg-turbo
+    libglvnd libx11 libxrandr libxfixes libxext json-c libpng libjpeg-turbo libwebp
 
 cd linux
 make run                         # run from the source tree
@@ -97,8 +109,9 @@ you save the file**:
 ```ini
 effect = rain
 fps = 30
+hidpi = false                       # true: full resolution, incl. fractional scales (1.5x)
 pause_on_battery = true
-wallpaper = ~/Pictures/lake.jpg     # JPEG or PNG; defaults to GNOME's setting if any
+wallpaper = ~/Pictures/lake.jpg     # JPEG, PNG or WebP; detected from your desktop if unset
 
 [rain]
 fog = 0.4
@@ -106,13 +119,54 @@ darken = 0.5
 ```
 
 `scrim --list` shows every effect and its parameters. `scrim --help` shows
-the command-line options, which override the file. On Wayland, rendering stops by itself
-when the compositor stops asking for frames: the output is covered, off or locked.
-It also pauses on battery, which is read from `/sys/class/power_supply`.
+the command-line options, which override the file.
 
-**Not done yet on Linux:** a tray icon or settings window, reading the wallpaper of
-desktops other than GNOME/Cinnamon (set `wallpaper =` instead), and formats other
-than JPEG/PNG.
+Scrim stops rendering when nobody can see it or power is short:
+
+- **Wayland:** when the compositor stops asking for frames, because the output is
+  covered, off or locked. Sway does this as soon as a window (tiled or fullscreen)
+  covers the whole output; with gaps the wallpaper stays visible, so Scrim keeps
+  drawing. Other compositors may differ: `scrim --stats` shows the frame rate.
+- **X11:** when its window is fully covered (not reported under compositors such as
+  picom), when the active window is fullscreen on that monitor, or when DPMS has
+  turned the screens off.
+- **On battery** (`pause_on_battery`, read from `/sys/class/power_supply`) and in the
+  **power-saver** profile of GNOME/KDE's power menu (`pause_on_power_saver`).
+
+Without `wallpaper =`, Scrim draws over the wallpaper your desktop shows. It reads it
+from swww, hyprpaper, swaybg (including Sway's `output * bg`), KDE Plasma, XFCE,
+GNOME/Cinnamon/Budgie/MATE, `~/.fehbg` or nitrogen, and checks again every 10 seconds,
+so changing your wallpaper (or editing the image) carries over. `scrim --print-wallpaper`
+shows what it found and where.
+
+### Controlling a running Scrim
+
+`scrim msg` sends a command to the running instance, so you can bind it to a key or a
+status-bar button:
+
+```sh
+scrim msg toggle            # also: pause, resume (or: kill -USR1 $(pidof scrim))
+scrim msg next              # next effect
+scrim msg effect condensation
+scrim msg param fog=0.8     # a parameter of the current effect
+scrim msg status            # effect, state, wallpaper and parameter values
+scrim msg reload            # forget msg changes and re-read the config file
+```
+
+```ini
+# Hyprland
+bind = SUPER, F9, exec, scrim msg toggle
+# Sway
+bindsym $mod+F9 exec scrim msg toggle
+```
+
+Changes made with `scrim msg` last until `reload` or a restart; to keep one, put it in
+the config file. Editing a setting in the file overrides an earlier `msg` change to
+that same setting. `paused = true` in the file pauses too. Only one Scrim runs per
+user: a second one exits straight away (with status 0, so a systemd unit doesn't
+keep retrying). The socket is `$XDG_RUNTIME_DIR/scrim.sock`.
+
+**Not done yet on Linux:** a tray icon or settings window, and AVIF/JPEG XL wallpapers.
 
 ### Testing without a Linux machine
 
@@ -133,6 +187,11 @@ macos/build/Scrim.app/Contents/MacOS/Scrim \
 linux/build/scrim --snapshot out.png --effect rain --time 12 --size 1280x800  # Linux
 ```
 
+While Scrim runs, it reloads the current effect whenever `tools/effectc` rebuilds it, so
+you can edit a shader, rebuild, and see the result without restarting. If the new
+version doesn't compile, the old one keeps running. To rebuild on every save, use a
+file watcher, e.g. `ls effects/snow/*.frag | entr tools/effectc effects/snow`.
+
 `--snapshot` also prints the median time per frame and the memory use. On Linux it
 needs no display server (it uses headless EGL), so it works over SSH and in CI.
 Effects with persistent passes are simulated from 0 up to `--time` in steps of
@@ -143,7 +202,8 @@ at a folder. Read the portability rules in the spec. Format 2 adds *persistent p
 read their own output from the previous frame; `effects/condensation` is a small example. In particular, never call
 `smoothstep` with its edges reversed: Metal tolerates it, Mesa doesn't.
 
-macOS: `SCRIM_DEBUG=1` logs the frame rate, pause reasons and memory every 5 s.
+macOS: `SCRIM_DEBUG=1` logs the frame rate, pause reasons and memory every 5 s, and
+`macos/test.sh` runs the unit tests.
 Linux: `scrim --stats` does the same.
 
 ## Building packages and releasing
@@ -213,4 +273,4 @@ Scrim is released under the [MIT License](LICENSE), with these exceptions:
 - The hash functions in `tools/prelude.glsl` are based on "Hash without Sine" by Dave
   Hoskins (MIT); keep that credit.
 
-The `rain` and `plain` effects are original work under MIT.
+The `rain`, `snow`, `condensation` and `plain` effects are original work under MIT.

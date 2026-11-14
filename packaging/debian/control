@@ -11,6 +11,8 @@ Build-Depends: debhelper-compat (= 13),
                libx11-dev,
                libxrandr-dev,
                libxfixes-dev,
+               libxext-dev,
+               libwebp-dev,
                libjson-c-dev,
                libpng-dev,
                libjpeg-dev

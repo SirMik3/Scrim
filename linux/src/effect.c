@@ -160,6 +160,31 @@ bool rp_effect_find(rp_effect *e, const char *id, char *err, size_t errlen) {
     return false;
 }
 
+static int compare_ids(const void *a, const void *b) { return strcmp(a, b); }
+
+int rp_effect_ids(char ids[][64], int max) {
+    char dirs[4][PATH_MAX];
+    int n = rp_effect_dirs(dirs, 4), count = 0;
+    for (int i = 0; i < n; i++) {
+        DIR *d = opendir(dirs[i]);
+        if (!d) continue;
+        struct dirent *ent;
+        while ((ent = readdir(d)) && count < max) {
+            if (ent->d_name[0] == '.') continue;
+            char dir[2 * PATH_MAX], err[512];
+            snprintf(dir, sizeof dir, "%.4000s/%.255s", dirs[i], ent->d_name);
+            rp_effect e;
+            if (!rp_effect_load(&e, dir, err, sizeof err)) continue;
+            bool seen = false;
+            for (int k = 0; k < count && !seen; k++) seen = !strcmp(ids[k], e.id);
+            if (!seen) snprintf(ids[count++], 64, "%s", e.id);
+        }
+        closedir(d);
+    }
+    qsort(ids, (size_t)count, 64, compare_ids);
+    return count;
+}
+
 void rp_effect_print_all(void) {
     char dirs[4][PATH_MAX];
     int n = rp_effect_dirs(dirs, 4);

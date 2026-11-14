@@ -73,6 +73,7 @@ static void usage(FILE *f) {
         "  -c, --config PATH          config file (default ~/.config/scrim/scrim.conf)\n"
         "      --backend wayland|x11  force a display backend\n"
         "  -l, --list                 list effects and their parameters\n"
+        "      --print-wallpaper      show which wallpaper Scrim detects, and from where\n"
         "      --stats                print frame rate and memory every 5 s\n"
         "      --duration SECONDS     quit after this long (for testing)\n"
         "      --snapshot PATH.png    render one frame offscreen, without a display, and exit\n"
@@ -80,6 +81,10 @@ static void usage(FILE *f) {
         "                             simulated up to it in steps of 1/fps (default 10)\n"
         "      --size WxH             (snapshot) image size (default 1280x800)\n"
         "A snapshot uses the effect's defaults plus --param, not the config file.\n"
+        "\n"
+        "       scrim msg COMMAND         control the running instance: pause, resume, toggle,\n"
+        "                                 effect ID, next, param ID=VALUE, reload, status\n"
+        "kill -USR1 $(pidof scrim) also toggles pause.\n"
         "The config file is reloaded whenever it is saved. Command-line options win over it.\n");
 }
 
@@ -97,7 +102,7 @@ static bool parse_cli(int argc, char **argv, cli_options *o) {
         {"list", no_argument, 0, 'l'}, {"stats", no_argument, 0, 's'},
         {"duration", required_argument, 0, 'd'}, {"help", no_argument, 0, 'h'},
         {"snapshot", required_argument, 0, 'S'}, {"time", required_argument, 0, 'T'},
-        {"size", required_argument, 0, 'Z'}, {0, 0, 0, 0},
+        {"size", required_argument, 0, 'Z'}, {"print-wallpaper", no_argument, 0, 'W'}, {0, 0, 0, 0},
     };
     int c;
     while ((c = getopt_long(argc, argv, "e:p:f:w:c:lh", longopts, NULL)) != -1) {
@@ -119,6 +124,14 @@ static bool parse_cli(int argc, char **argv, cli_options *o) {
         case 'c': snprintf(o->config_path, sizeof o->config_path, "%s", optarg); break;
         case 'b': o->backend = optarg; break;
         case 'l': rp_effect_print_all(); exit(0);
+        case 'W': {
+            char wp[PATH_MAX];
+            const char *source = NULL;
+            rp_wallpaper_detect(wp, sizeof wp, &source);
+            if (!wp[0]) { printf("no wallpaper detected; set `wallpaper =` in the config file\n"); exit(1); }
+            printf("%s (from %s)\n", wp, source);
+            exit(0);
+        }
         case 's': o->stats = true; break;
         case 'd': o->duration = atof(optarg); break;
         case 'S': o->snapshot = optarg; break;
@@ -146,9 +159,23 @@ static float params[RP_MAX_PARAMS];
 static rp_texture wallpaper;
 static char wallpaper_loaded[PATH_MAX] = "\x01";   // forces the first load
 static int wallpaper_side;
+static struct timespec wallpaper_mtime;
 static const rp_backend *backend;
 static int timer_fd = -1;
 static bool outputs_ready;
+static bool on_battery, power_saver, screens_off;
+static bool pause_dirty;            // pause state may have changed outside the timer tick
+static int ino = -1;                // inotify: the config file and the current effect
+static int effect_wd[2] = {-1, -1}; // watches on the effect folder and its build/ folder
+static double effect_reload_at;     // when to reload the changed effect (0: not pending)
+
+// Changes made with `scrim msg` (newest of all sources) until `reload` or a restart.
+static struct {
+    int paused;                     // -1: follow the config file
+    char effect[64];
+    int nvalues;
+    rp_param_value values[64];
+} runtime = { .paused = -1 };
 
 static double now_seconds(void) {
     struct timespec ts;
@@ -156,12 +183,22 @@ static double now_seconds(void) {
     return (double)ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+static double timer_interval;
+
 static void set_timer(double interval) {
+    timer_interval = interval;
     struct itimerspec its = {0};
     its.it_interval.tv_sec = (time_t)interval;
     its.it_interval.tv_nsec = (long)((interval - (double)(time_t)interval) * 1e9);
     its.it_value = its.it_interval;
     timerfd_settime(timer_fd, 0, &its, NULL);
+}
+
+// Re-arms the frame timer only when the interval changes (re-arming resets its phase).
+static void set_timer_if_changed(double interval) {
+    if (interval == timer_interval) return;
+    timer_interval = interval;
+    set_timer(interval);
 }
 
 static void make_current_any(void) {
@@ -184,7 +221,10 @@ static void write_template(const char *path) {
         "# Scrim settings. Changes apply as soon as you save this file.\n"
         "# Run `scrim --list` to see every effect and its parameters.\n\n"
         "# effect = rain\n# fps = 30\n# hidpi = false\n# pause_on_battery = true\n"
-        "# wallpaper = ~/Pictures/your-image.jpg   (default: GNOME's setting, if any)\n\n");
+        "# pause_on_power_saver = true\n"
+        "# paused = false   (also: `scrim msg pause|resume|toggle`, or kill -USR1)\n"
+        "# wallpaper = ~/Pictures/your-image.jpg   (default: detected from your desktop,\n"
+        "#             see `scrim --print-wallpaper`)\n\n");
     if (effect.nparams) {
         fprintf(f, "# [%s]\n", effect.id);
         for (int i = 0; i < effect.nparams; i++) {
@@ -215,18 +255,95 @@ static void config_file_path(char *path, size_t len) {
     else rp_config_path(path, len);
 }
 
-// Defaults, then the config file, then the command line.
+// Defaults, then the config file, then the command line, then `scrim msg` changes.
 static void merge_settings(rp_config *next) {
+    static char file_effect[64];
+    static bool file_paused, file_seen;
     char path[PATH_MAX], err[1024];
     config_file_path(path, sizeof path);
     rp_config_defaults(next);
     if (!rp_config_load(next, path, err, sizeof err)) rp_log("%s", err);
+    // Changing a setting in the file wins over an earlier `scrim msg` change to it.
+    if (file_seen && strcmp(next->effect, file_effect) != 0) runtime.effect[0] = 0;
+    if (file_seen && next->paused != file_paused) runtime.paused = -1;
+    snprintf(file_effect, sizeof file_effect, "%s", next->effect);
+    file_paused = next->paused;
+    file_seen = true;
     if (cli.effect[0]) snprintf(next->effect, sizeof next->effect, "%s", cli.effect);
     if (cli.fps > 0) next->fps = cli.fps < 120 ? cli.fps : 120;
     if (cli.hidpi >= 0) next->hidpi = cli.hidpi;
     if (cli.pause_on_battery >= 0) next->pause_on_battery = cli.pause_on_battery;
     if (cli.wallpaper[0]) snprintf(next->wallpaper, sizeof next->wallpaper, "%s", cli.wallpaper);
     for (int i = 0; i < cli.nvalues; i++) rp_config_set_value(next, next->effect, cli.values[i][0], cli.values[i][1]);
+    if (runtime.effect[0]) snprintf(next->effect, sizeof next->effect, "%s", runtime.effect);
+    for (int i = 0; i < runtime.nvalues; i++)
+        rp_config_set_value(next, runtime.values[i].section, runtime.values[i].key, runtime.values[i].value);
+}
+
+// (Re)loads the wallpaper when its path, the file itself, or the largest output size
+// changed. Detection runs again each time unless `wallpaper =` is set.
+static void refresh_wallpaper(void) {
+    char wp[PATH_MAX], cfg_path[PATH_MAX];
+    const char *source = NULL;
+    if (cfg.wallpaper[0]) snprintf(wp, sizeof wp, "%s", cfg.wallpaper);
+    else rp_wallpaper_detect(wp, sizeof wp, &source);
+    struct stat st;
+    struct timespec mtime = {0};
+    if (wp[0] && stat(wp, &st) == 0) mtime = st.st_mtim;
+    int side = max_output_side();
+    if (!strcmp(wp, wallpaper_loaded) && side == wallpaper_side &&
+        mtime.tv_sec == wallpaper_mtime.tv_sec && mtime.tv_nsec == wallpaper_mtime.tv_nsec) return;
+
+    make_current_any();
+    rp_wallpaper_release(&wallpaper);
+    bool ok = rp_wallpaper_load(&wallpaper, wp, side);
+    if (ok) rp_log("wallpaper: %s%s%s%s (%dx%d)", wp, source ? " (from " : "", source ? source : "",
+                   source ? ")" : "", wallpaper.width, wallpaper.height);
+    if (!ok && !wp[0]) {
+        config_file_path(cfg_path, sizeof cfg_path);
+        rp_log("no wallpaper found: add `wallpaper = /path/to/image.jpg` to %s", cfg_path);
+    }
+    snprintf(wallpaper_loaded, sizeof wallpaper_loaded, "%s", wp);
+    wallpaper_side = side;
+    wallpaper_mtime = mtime;
+    for (int i = 0; i < backend->count(); i++) {
+        rp_output *o = backend->output(i);
+        if (o) o->needs_redraw = true;   // show it even while paused
+    }
+}
+
+// Watches the current effect's folder, so a rebuilt effect (tools/effectc) is
+// picked up without restarting: the shader hot-reload for effect authors.
+static void watch_effect(void) {
+    if (ino < 0) return;
+    for (int i = 0; i < 2; i++) {
+        if (effect_wd[i] >= 0) inotify_rm_watch(ino, effect_wd[i]);
+        effect_wd[i] = -1;
+    }
+    char build[PATH_MAX + 8];
+    snprintf(build, sizeof build, "%s/build", effect.dir);
+    effect_wd[0] = inotify_add_watch(ino, effect.dir, IN_CLOSE_WRITE | IN_MOVED_TO);
+    effect_wd[1] = inotify_add_watch(ino, build, IN_CLOSE_WRITE | IN_MOVED_TO);
+}
+
+// Reloads the current effect from disk; keeps the running one if the new one fails.
+static void reload_effect(void) {
+    char err[1024];
+    rp_effect e;
+    make_current_any();
+    if (!rp_effect_load(&e, effect.dir, err, sizeof err) || !rp_effect_compile(&e, err, sizeof err)) {
+        rp_effect_release(&e);
+        rp_log("effect changed on disk but can't be loaded, keeping the running version: %s", err);
+        return;
+    }
+    rp_effect_release(&effect);
+    effect = e;
+    rp_config_params(&cfg, &effect, params);
+    rp_log("effect %s reloaded", effect.id);
+    for (int i = 0; i < backend->count(); i++) {
+        rp_output *o = backend->output(i);
+        if (o) o->needs_redraw = true;
+    }
 }
 
 // Applies merged settings: effect, params, wallpaper, frame rate.
@@ -248,6 +365,7 @@ static bool apply_settings(bool first) {
         } else {
             if (effect.compiled) rp_effect_release(&effect);
             effect = e;
+            watch_effect();
             rp_log("effect: %s%s%s%s", effect.name, *effect.license ? " [" : "", effect.license,
                    *effect.license ? "]" : "");
         }
@@ -257,24 +375,107 @@ static bool apply_settings(bool first) {
     if (first && access(path, F_OK) != 0 && !cli.config_path[0]) write_template(path);
 
     if (!outputs_ready) return true;   // the wallpaper is decoded at the outputs' size
-    char wp[PATH_MAX];
-    if (cfg.wallpaper[0]) snprintf(wp, sizeof wp, "%s", cfg.wallpaper);
-    else rp_wallpaper_detect(wp, sizeof wp);
-    int side = max_output_side();
-    if (strcmp(wp, wallpaper_loaded) != 0 || side != wallpaper_side) {
-        rp_wallpaper_release(&wallpaper);
-        if (!rp_wallpaper_load(&wallpaper, wp, side) && !wp[0])
-            rp_log("no wallpaper set: add `wallpaper = /path/to/image.jpg` to %s", path);
-        snprintf(wallpaper_loaded, sizeof wallpaper_loaded, "%s", wp);
-        wallpaper_side = side;
-    }
-
+    refresh_wallpaper();
     for (int i = 0; i < backend->count(); i++) {
         rp_output *o = backend->output(i);
         if (o) o->needs_redraw = true;
     }
     if (timer_fd >= 0) set_timer(1.0 / cfg.fps);
     return true;
+}
+
+// ---- scrim msg -----------------------------------------------------------------
+
+static bool user_paused(void) { return runtime.paused >= 0 ? runtime.paused : cfg.paused; }
+
+// Why rendering is paused right now ("" if it isn't).
+static const char *pause_reason_now(void) {
+    if (user_paused()) return "paused";
+    if (cfg.pause_on_battery && on_battery) return "on battery: paused";
+    if (cfg.pause_on_power_saver && power_saver) return "power saver: paused";
+    if (screens_off) return "screens off: paused";
+    return "";
+}
+
+static void set_user_paused(bool paused) {
+    runtime.paused = paused;
+    pause_dirty = true;
+}
+
+// Switches to effect `id` for this session. False (and a reply) if it can't load.
+static bool switch_effect(const char *id, char *reply, size_t len) {
+    rp_effect probe;
+    char err[1024];
+    if (!rp_effect_find(&probe, id, err, sizeof err)) { snprintf(reply, len, "error: %s\n", err); return false; }
+    snprintf(runtime.effect, sizeof runtime.effect, "%s", probe.id);
+    apply_settings(false);
+    if (strcmp(effect.id, probe.id) != 0) {
+        runtime.effect[0] = 0;
+        snprintf(reply, len, "error: effect '%s' failed to load (see Scrim's log)\n", id);
+        return false;
+    }
+    snprintf(reply, len, "effect %s\n", effect.id);
+    return true;
+}
+
+static void handle_command(const char *line, char *reply, size_t len) {
+    char cmd[32] = "", arg[256] = "";
+    sscanf(line, "%31s %255[^\n]", cmd, arg);
+    if (!strcmp(cmd, "pause") || !strcmp(cmd, "resume") || !strcmp(cmd, "toggle")) {
+        bool p = !strcmp(cmd, "pause") ? true : !strcmp(cmd, "resume") ? false : !user_paused();
+        set_user_paused(p);
+        const char *other = pause_reason_now();
+        if (p || !other[0]) snprintf(reply, len, "%s\n", p ? "paused" : "running");
+        else snprintf(reply, len, "running (but %s)\n", other);
+    } else if (!strcmp(cmd, "effect") && arg[0]) {
+        switch_effect(arg, reply, len);
+    } else if (!strcmp(cmd, "next")) {
+        char ids[64][64];
+        int n = rp_effect_ids(ids, 64), at = 0;
+        for (int i = 0; i < n; i++) if (!strcmp(ids[i], effect.id)) at = i;
+        // Skip effects that fail to load rather than getting stuck on them.
+        for (int k = 1; k <= n; k++)
+            if (n && switch_effect(ids[(at + k) % n], reply, len)) return;
+        if (!reply[0]) snprintf(reply, len, "error: no other effect could be loaded\n");
+    } else if (!strcmp(cmd, "param") && strchr(arg, '=')) {
+        char *eq = strchr(arg, '=');
+        *eq = 0;
+        char key[64], value[64];
+        snprintf(key, sizeof key, "%.63s", arg);
+        snprintf(value, sizeof value, "%.63s", eq + 1);
+        int index = -1;
+        for (int i = 0; i < effect.nparams; i++) if (!strcmp(effect.params[i].id, key)) index = i;
+        if (index < 0) { snprintf(reply, len, "error: effect '%s' has no parameter '%s'\n", effect.id, key); return; }
+        int slot = runtime.nvalues;
+        for (int i = 0; i < runtime.nvalues; i++)
+            if (!strcmp(runtime.values[i].section, effect.id) && !strcmp(runtime.values[i].key, key)) slot = i;
+        if (slot == (int)(sizeof runtime.values / sizeof *runtime.values)) { snprintf(reply, len, "error: too many changes, use reload\n"); return; }
+        if (slot == runtime.nvalues) runtime.nvalues++;
+        snprintf(runtime.values[slot].section, sizeof runtime.values[slot].section, "%s", effect.id);
+        snprintf(runtime.values[slot].key, sizeof runtime.values[slot].key, "%s", key);
+        snprintf(runtime.values[slot].value, sizeof runtime.values[slot].value, "%s", value);
+        apply_settings(false);
+        snprintf(reply, len, "%s = %g\n", key, params[index]);
+    } else if (!strcmp(cmd, "reload")) {
+        runtime.paused = -1;
+        runtime.effect[0] = 0;
+        runtime.nvalues = 0;
+        pause_dirty = true;
+        apply_settings(false);
+        snprintf(reply, len, "reloaded\n");
+    } else if (!strcmp(cmd, "status")) {
+        size_t n = 0;
+        const char *state = pause_reason_now()[0] ? pause_reason_now() : "running";
+        n += (size_t)snprintf(reply + n, len - n, "effect: %s (%s)\nstate: %s\nfps: %d\nwallpaper: %s\n",
+                              effect.id, effect.name, state, cfg.fps, wallpaper_loaded[0] ? wallpaper_loaded : "(none)");
+        for (int i = 0; i < effect.nparams && n < len; i++) {
+            const rp_param *q = &effect.params[i];
+            if (q->type == RP_PARAM_BOOL) n += (size_t)snprintf(reply + n, len - n, "%s = %s\n", q->id, params[i] > 0.5f ? "true" : "false");
+            else n += (size_t)snprintf(reply + n, len - n, "%s = %g\n", q->id, params[i]);
+        }
+    } else {
+        snprintf(reply, len, "error: unknown command '%s' (run `scrim msg` for the list)\n", line);
+    }
 }
 
 // ---- EGL ---------------------------------------------------------------------
@@ -326,6 +527,7 @@ long rp_rss_kb(void) {
 // ---- main loop -----------------------------------------------------------------
 
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "msg")) return rp_control_client(argc - 2, argv + 2);
     if (!parse_cli(argc, argv, &cli)) return 2;
     if (cli.snapshot) {
         rp_snapshot_options so = {
@@ -334,6 +536,13 @@ int main(int argc, char **argv) {
             .width = cli.width, .height = cli.height, .nvalues = cli.nvalues, .values = cli.values,
         };
         return rp_snapshot_run(&so);
+    }
+
+    int control_fd = rp_control_listen();
+    if (control_fd == RP_CONTROL_RUNNING) {
+        // Exit cleanly, so a systemd unit with Restart=on-failure doesn't keep retrying.
+        rp_log("Scrim is already running; control it with `scrim msg`");
+        return 0;
     }
 
     char err[1024] = "";
@@ -368,33 +577,34 @@ int main(int argc, char **argv) {
     else rp_config_path(cfg_path, sizeof cfg_path);
     snprintf(cfg_dir, sizeof cfg_dir, "%s", cfg_path);
     char *cfg_name = strrchr(cfg_path, '/') ? strrchr(cfg_path, '/') + 1 : cfg_path;
-    int ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-    if (ino >= 0 && inotify_add_watch(ino, dirname(cfg_dir), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) < 0) {
-        close(ino);
-        ino = -1;
-    }
+    ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    int cfg_wd = ino >= 0 ? inotify_add_watch(ino, dirname(cfg_dir), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) : -1;
+    watch_effect();
 
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTERM);
     sigaddset(&mask, SIGHUP);
+    sigaddset(&mask, SIGUSR1);
     sigprocmask(SIG_BLOCK, &mask, NULL);
     int sig_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
 
-    double start = now_seconds(), last = start, stats_at = start + 5, battery_at = 0;
+    double start = now_seconds(), last = start, stats_at = start + 5, battery_at = 0, wallpaper_at = start + 10;
     double time = 0, frame = 0;
-    bool on_battery = false, was_paused = false;
+    bool was_paused = false;
+    const char *pause_reason = "";
     long frames_drawn = 0;
     set_timer(1.0 / cfg.fps);
 
     for (bool running = true; running;) {
         backend->prepare_poll();
-        struct pollfd fds[4] = {
+        struct pollfd fds[5] = {
             { .fd = backend->fd(), .events = POLLIN }, { .fd = timer_fd, .events = POLLIN },
             { .fd = ino, .events = POLLIN }, { .fd = sig_fd, .events = POLLIN },
+            { .fd = control_fd, .events = POLLIN },
         };
-        int r = poll(fds, 4, -1);
+        int r = poll(fds, 5, -1);
         backend->after_poll(r > 0 && (fds[0].revents & POLLIN));
         if (r < 0 && errno != EINTR) break;
 
@@ -402,6 +612,7 @@ int main(int argc, char **argv) {
             struct signalfd_siginfo si;
             if (read(sig_fd, &si, sizeof si) == sizeof si) {
                 if (si.ssi_signo == SIGHUP) apply_settings(false);
+                else if (si.ssi_signo == SIGUSR1) set_user_paused(!user_paused());
                 else running = false;
             }
         }
@@ -412,24 +623,51 @@ int main(int argc, char **argv) {
             while ((len = read(ino, buf, sizeof buf)) > 0)
                 for (char *p = buf; p < buf + len;) {
                     struct inotify_event *ev = (struct inotify_event *)p;
-                    if (ev->len && !strcmp(ev->name, cfg_name)) hit = true;
+                    if (ev->wd == cfg_wd && ev->len && !strcmp(ev->name, cfg_name)) hit = true;
+                    // effectc renames many files into build/; wait for it to finish.
+                    bool effect_file = ev->len && (!strcmp(ev->name, "manifest.json") || strstr(ev->name, ".gles"));
+                    if ((ev->wd == effect_wd[0] || ev->wd == effect_wd[1]) && effect_file)
+                        effect_reload_at = now_seconds() + 0.3;
                     p += sizeof *ev + ev->len;
                 }
-            if (hit) { rp_log("settings changed, reloading"); apply_settings(false); }
+            if (hit) { rp_log("settings changed, reloading"); apply_settings(false); pause_dirty = true; }
+        }
+        if (control_fd >= 0 && (fds[4].revents & POLLIN)) rp_control_accept(control_fd, handle_command);
+        if (pause_dirty) {   // react now instead of on the next (possibly 1 s) tick
+            pause_dirty = false;
+            set_timer(0.001);
         }
         if (!(fds[1].revents & POLLIN)) continue;
         uint64_t expirations;
         if (read(timer_fd, &expirations, sizeof expirations) < 0) continue;
 
         double now = now_seconds();
-        if (now >= battery_at) { on_battery = rp_on_battery(); battery_at = now + 5; }
-        bool paused = cfg.pause_on_battery && on_battery;
-        if (paused != was_paused) {
-            rp_log(paused ? "on battery: paused" : "resumed");
-            set_timer(paused ? 1.0 : 1.0 / cfg.fps);   // paused: wake once a second to re-check
-            was_paused = paused;
-            last = now;
+        if (effect_reload_at > 0 && now >= effect_reload_at) {
+            effect_reload_at = 0;
+            reload_effect();
         }
+        if (now >= battery_at) {
+            on_battery = rp_on_battery();
+            power_saver = rp_power_saver();
+            screens_off = backend->screens_off && backend->screens_off();
+            battery_at = now + 5;
+        }
+        // Follow the wallpaper: a changed setting in the desktop, an edited file, or
+        // (checked every tick, it's cheap) a bigger output after a monitor change.
+        if (now >= wallpaper_at || max_output_side() != wallpaper_side) {
+            refresh_wallpaper();
+            wallpaper_at = now + 10;
+        }
+        const char *reason = pause_reason_now();
+        bool paused = reason[0] != 0;
+        if (strcmp(reason, pause_reason) != 0) {
+            rp_log("%s", paused ? reason : "resumed");
+            pause_reason = reason;
+            if (paused != was_paused) last = now;   // don't count paused time as one long frame
+            was_paused = paused;
+        }
+        // Paused: wake once a second to re-check. Also restores the rate after set_timer(0.001).
+        set_timer_if_changed(paused ? 1.0 : 1.0 / cfg.fps);
         double delta = fmin(fmax(now - last, 0), 0.1);
         last = now;
 
@@ -462,6 +700,7 @@ int main(int argc, char **argv) {
         if (cli.duration > 0 && now - start >= cli.duration) running = false;
     }
 
+    rp_control_close(control_fd);
     make_current_any();
     rp_effect_release(&effect);
     rp_wallpaper_release(&wallpaper);
