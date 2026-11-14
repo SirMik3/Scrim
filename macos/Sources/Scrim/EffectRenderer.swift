@@ -95,7 +95,10 @@ final class EffectRenderer: NSObject, MTKViewDelegate {
         uniforms[0] = SIMD4(Float(time), Float(frame), Float(delta), Float(wallpaper.mipmapLevelCount))
         uniforms[2] = SIMD4(Float(size.width), Float(size.height),
                             Float(wallpaper.width), Float(wallpaper.height))
-        uniforms.append(contentsOf: params)   // 3 + 16 vec4 = 304 bytes, as in the spec
+        uniforms.append(contentsOf: params)
+        // uState: persistent passes (format 2) aren't supported on macOS yet, so it is always
+        // zero. 3 + 16 + 1 vec4 = 320 bytes, as in the spec.
+        uniforms.append(.zero)
 
         var previous: MTLTexture = wallpaper
         let last = compiled.pipelines.count - 1

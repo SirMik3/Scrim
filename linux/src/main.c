@@ -412,7 +412,7 @@ int main(int argc, char **argv) {
                 advanced = true;
             }
             rp_render_frame(&effect, &o->targets, &wallpaper, params, time, frame, delta,
-                            o->render_w, o->render_h);
+                            !paused, o->render_w, o->render_h);
             backend->before_swap(o);
             eglSwapBuffers(rp_egl_display, o->egl_surface);
             o->needs_redraw = false;

@@ -1,7 +1,11 @@
-# Scrim effect format, v1
+# Scrim effect format, v2
 
-This is the contract shared by every Scrim host (macOS now, Linux later).
+This is the contract shared by every Scrim host (macOS and Linux).
 An effect written against this document must look the same on every host.
+
+Format 2 adds **persistent passes**, which can read their own output from the previous
+frame (see [Persistent passes](#persistent-passes-format-2)). Everything else is
+unchanged from format 1, and hosts that support format 2 still run format 1 effects.
 
 ## Folder layout
 
@@ -46,12 +50,18 @@ which keeps them small. Run `tools/effectc <effect-dir>` after editing a shader.
 }
 ```
 
-- `format` must be `1`.
+- `format` must be `1` or `2`. Use `2` only if the effect uses persistent passes or
+  `pixelFormat`, so that older hosts can still run everything else.
 - `id`: lowercase `[a-z0-9-]+`, unique. It is used as the settings key.
 - `passes`: run in order, from 1 to 8 of them.
   - `shader` is a file name in the effect folder, and its stem is used for `build/<stem>.*`.
   - `scale` is the pass's output size relative to the render size. It can be from 0.125 to 1 and defaults to 1. Lower values are cheaper and blurrier.
   - **The last pass always renders straight to the screen at full render size, and its `scale` is ignored.**
+  - `persistent` (format 2, default `false`): keep this pass's output between frames and
+    give it to the pass as `uFeedback`. Not allowed on the last pass.
+  - `pixelFormat` (format 2): `"rgba8"` (default) or `"rgba16f"`. Use `rgba16f` for
+    simulation state, which needs negative values or more than 8 bits of precision.
+    Not allowed on the last pass.
 - `author`, `license`, `source` (optional strings): credits for the effect. If the
   effect folder contains `LICENSE*` or `NOTICE*` files, hosts must ship them with it.
 - `params`: at most 16 of them. Each has `id` (a valid GLSL identifier), `label`, `type`, and `default`.
@@ -78,6 +88,10 @@ which keeps them small. Run `tools/effectc <effect-dir>` after editing a shader.
 | `uWallpaper`          | `sampler2D` | The user's wallpaper as it is, not aspect-corrected. Use `wallpaperUV()`. Has a **full mip chain**, so `textureLod(uWallpaper, uv, lod)` gives a cheap blur (each level halves the resolution). |
 | `uPrevious`           | `sampler2D` | Output of the previous pass. For pass 0, this is the wallpaper. Sample it with `vUV` directly. |
 | `p_<id>`              | `float`     | Each manifest param, as a `#define`. |
+| `uFeedback`           | `sampler2D` | Persistent passes only: this pass's own output from its previous step. |
+| `uStateReset`         | `float`     | Persistent passes only: `1.0` on the first step after the state was created or cleared, else `0.0`. |
+| `uStateSteps`         | `float`     | Persistent passes only: steps since the state was reset (0 on the reset step). |
+| `uStepDelta`          | `float`     | Persistent passes only: seconds of rendered time since this pass last stepped on this screen. Use it, not a fixed step, so the effect runs at the same speed at any frame rate. |
 
 Helpers in the prelude:
 
@@ -99,7 +113,42 @@ Rules:
 - Every texture sample uses a trilinear filter (linear, with linear blending between mip levels) that clamps at the edges.
   `uPrevious` has no mipmaps, so `textureLod` on it always reads level 0.
 - Colour values are gamma-encoded sRGB in both directions, so don't convert to or from linear light.
-- Effects are stateless in v1. They cannot read their own output from the last frame.
+- Effects are stateless in format 1. They cannot read their own output from the last frame.
+
+## Persistent passes (format 2)
+
+```json
+{
+  "format": 2,
+  "passes": [
+    { "shader": "sim.frag", "scale": 0.5, "persistent": true, "pixelFormat": "rgba16f" },
+    { "shader": "composite.frag" }
+  ]
+}
+```
+
+A persistent pass keeps its output between frames. Each step it reads the previous
+state from `uFeedback` and writes the next one to `fragColor`. Later passes see the
+new state through `uPrevious` as usual.
+
+- **Initial state.** State starts as transparent black `(0,0,0,0)` and `uStateReset` is
+  `1.0` on that step. Write your initial state then instead of reading `uFeedback`.
+- **When it resets.** Hosts clear the state when the effect is (re)loaded and when the
+  screen's render size changes. Effects must not depend on the state surviving either.
+- **Per screen.** Each screen has its own state.
+- **Pausing.** While the host is paused, persistent passes don't step. If the host has
+  to redraw while paused (for example after an expose), it reuses the last state.
+- **Time.** Scale every change by `uStepDelta`. It is capped at 0.1 s, so a screen that
+  wasn't drawn for a while doesn't take one huge step.
+- **Reading texels exactly.** `texelFetch(uFeedback, ivec2(vUV * uResolution), 0)`
+  reads this pass's own pixel on every host. Use it, rather than `texture()`, for
+  simulations that must not blur over time. `uResolution` is the pass's own size.
+- **Precision.** `rgba16f` has about 3 decimal digits. Avoid accumulating large values
+  (such as total elapsed time) in it; keep them wrapped to a small range.
+- **Cost.** A persistent pass needs two textures (8 bytes per pixel each for `rgba16f`).
+  Prefer `scale` of 0.5 or less.
+- Only persistent passes may use `uFeedback`, `uStateReset`, `uStateSteps` and
+  `uStepDelta`; `tools/effectc` rejects other passes that do.
 
 ## Host binary contract (for host authors)
 
@@ -111,20 +160,31 @@ layout(set = 0, binding = 0, std140) uniform Host {
     vec4 uRes;         // xy = pass resolution, zw = 1 / resolution
     vec4 uSizes;       // xy = screen size, zw = wallpaper size
     vec4 uParams[16];  // .x = param value, in manifest order
+    vec4 uState;       // x = state reset, y = steps since reset, z = step delta (format 2)
 };
 layout(set = 0, binding = 1) uniform sampler2D uWallpaper;
 layout(set = 0, binding = 2) uniform sampler2D uPrevious;
+layout(set = 0, binding = 3) uniform sampler2D uFeedback;
 layout(location = 0) in  vec2 vUV;
 layout(location = 0) out vec4 fragColor;
 ```
 
-The uniform block is 304 bytes. Hosts draw one full-screen triangle and provide
-`vUV` at location 0, oriented as described above.
+The uniform block is 320 bytes. Hosts must always supply all 320, with `uState` zero
+for passes that aren't persistent. (Effects compiled for format 1 declare a 304-byte
+block without `uState`; the extra 16 bytes at the end are simply unused.) Hosts draw
+one full-screen triangle and provide `vUV` at location 0, oriented as described above.
 
-- Metal: the fragment function is `main0`. The block goes in `[[buffer(0)]]`, `uWallpaper` in `[[texture(1)]]` / `[[sampler(1)]]`, and `uPrevious` in `[[texture(2)]]` / `[[sampler(2)]]`. The vertex output must declare `float2 vUV [[user(locn0)]]`.
+Persistent passes need two render targets: each step reads one as `uFeedback` and
+writes the other, then they swap. Clear both to `(0,0,0,0)` when creating them. Passes
+that aren't persistent must still have a texture bound at `uFeedback`'s binding when
+the shader declares it (a 1×1 black texture is fine). For `rgba16f` on OpenGL ES 3.0,
+check for `GL_EXT_color_buffer_half_float` or `GL_EXT_color_buffer_float` and refuse
+the effect with a clear message if neither is present.
+
+- Metal: the fragment function is `main0`. The block goes in `[[buffer(0)]]`, `uWallpaper` in `[[texture(1)]]` / `[[sampler(1)]]`, `uPrevious` in `[[texture(2)]]` / `[[sampler(2)]]`, and `uFeedback` in `[[texture(3)]]` / `[[sampler(3)]]`. The vertex output must declare `float2 vUV [[user(locn0)]]`.
 - Vulkan: descriptor set 0 with the bindings above.
 - OpenGL ES 3 / GL: load `build/<pass>.gles`. GLSL ES 3.00 has no binding qualifiers, so bind
-  the uniform block `Host` and the samplers `uWallpaper` / `uPrevious` by name. The vertex
+  the uniform block `Host` and the samplers `uWallpaper` / `uPrevious` / `uFeedback` by name. The vertex
   shader outputs `vUV`. GL framebuffers are bottom-up, so when a pass renders into a texture
   that a later pass samples, flip the triangle vertically. Then `texture(uPrevious, vUV)`
   reads the same screen position. Upload images top row first.

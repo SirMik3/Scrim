@@ -1,5 +1,5 @@
 #version 450
-// ---- Scrim effect prelude (format 1) — prepended by tools/effectc ----
+// ---- Scrim effect prelude (formats 1 and 2) — prepended by tools/effectc ----
 // See spec/effect-format.md. Do not edit per effect.
 
 layout(set = 0, binding = 0, std140) uniform Host {
@@ -7,9 +7,11 @@ layout(set = 0, binding = 0, std140) uniform Host {
     vec4 uRes;         // xy = pass resolution, zw = 1 / resolution
     vec4 uSizes;       // xy = screen size, zw = wallpaper size
     vec4 uParams[16];
+    vec4 uState;       // format 2: x = state was just reset, y = steps since reset, z = step delta
 };
 layout(set = 0, binding = 1) uniform sampler2D uWallpaper;
 layout(set = 0, binding = 2) uniform sampler2D uPrevious;
+layout(set = 0, binding = 3) uniform sampler2D uFeedback;   // format 2: this pass's last output
 
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 fragColor;
@@ -22,6 +24,9 @@ layout(location = 0) out vec4 fragColor;
 #define uTexel         uRes.zw
 #define uScreenSize    uSizes.xy
 #define uWallpaperSize uSizes.zw
+#define uStateReset    uState.x
+#define uStateSteps    uState.y
+#define uStepDelta     uState.z
 
 float aspect() { return uScreenSize.x / uScreenSize.y; }
 

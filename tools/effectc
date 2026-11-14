@@ -23,6 +23,10 @@ from pathlib import Path
 PRELUDE = Path(__file__).resolve().parent / "prelude.glsl"
 MAX_PASSES = 8
 MAX_PARAMS = 16
+FORMATS = (1, 2)
+PIXEL_FORMATS = ("rgba8", "rgba16f")
+# Names that only exist for format 2 / persistent passes (see the spec).
+STATE_RE = re.compile(r"\b(uFeedback|uStateReset|uStateSteps|uStepDelta|uState)\b")
 ID_RE = re.compile(r"^[a-z0-9-]+$")
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -36,7 +40,8 @@ def validate(manifest: dict, effect_dir: Path) -> None:
         if not cond:
             raise EffectError(msg)
 
-    need(manifest.get("format") == 1, 'manifest "format" must be 1')
+    fmt = manifest.get("format")
+    need(fmt in FORMATS, f'manifest "format" must be one of {", ".join(map(str, FORMATS))}')
     need(isinstance(manifest.get("id"), str) and ID_RE.match(manifest["id"]),
          '"id" must match [a-z0-9-]+')
     need(isinstance(manifest.get("name"), str), '"name" is required')
@@ -54,6 +59,22 @@ def validate(manifest: dict, effect_dir: Path) -> None:
         scale = p.get("scale", 1.0)
         need(isinstance(scale, (int, float)) and 0.125 <= scale <= 1.0,
              f"pass {i}: scale must be in [0.125, 1]")
+        last = i == len(passes) - 1
+        persistent = p.get("persistent", False)
+        pixel_format = p.get("pixelFormat", "rgba8")
+        need(isinstance(persistent, bool), f'pass {i}: "persistent" must be true or false')
+        need(pixel_format in PIXEL_FORMATS,
+             f'pass {i}: "pixelFormat" must be one of {", ".join(PIXEL_FORMATS)}')
+        if ("persistent" in p or "pixelFormat" in p) and fmt < 2:
+            raise EffectError(f'pass {i}: "persistent" and "pixelFormat" need "format": 2')
+        need(not (last and persistent),
+             f"pass {i}: the last pass draws to the screen and can't be persistent")
+        need(not (last and "pixelFormat" in p),
+             f'pass {i}: the last pass draws to the screen, so "pixelFormat" does not apply')
+        src = strip_comments((effect_dir / shader).read_text())
+        used = sorted(set(STATE_RE.findall(src)))
+        need(persistent or not used,
+             f"pass {i} ({shader}) uses {', '.join(used)}, which only persistent passes have")
     params = manifest.get("params", [])
     need(isinstance(params, list) and len(params) <= MAX_PARAMS,
          f'"params" must be a list of at most {MAX_PARAMS} entries')
@@ -74,6 +95,10 @@ def validate(manifest: dict, effect_dir: Path) -> None:
             need(isinstance(p.get("default"), bool), f"param {pid}: bool needs a true/false default")
         else:
             raise EffectError(f"param {pid}: type must be 'float' or 'bool'")
+
+
+def strip_comments(src: str) -> str:
+    return re.sub(r"/\*.*?\*/|//[^\n]*", "", src, flags=re.S)
 
 
 def run(cmd: list) -> None:

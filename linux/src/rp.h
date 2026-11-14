@@ -1,5 +1,5 @@
 // Scrim for Linux — shared declarations.
-// Implements spec/effect-format.md (format 1) with EGL + OpenGL ES 3.0.
+// Implements spec/effect-format.md (formats 1 and 2) with EGL + OpenGL ES 3.0.
 #pragma once
 
 #include <EGL/egl.h>
@@ -27,8 +27,10 @@ typedef struct {
 typedef struct {
     char stem[128];
     float scale;
+    bool persistent;            // keeps its output between frames (format 2)
+    bool half_float;            // pixelFormat "rgba16f" (format 2)
     GLuint program;
-    GLint loc_wallpaper, loc_previous, loc_flip;
+    GLint loc_wallpaper, loc_previous, loc_feedback, loc_flip;
 } rp_pass;
 
 typedef struct {
@@ -36,6 +38,7 @@ typedef struct {
     char name[128];
     char license[128];
     char dir[PATH_MAX];
+    unsigned generation;        // unique per load; render targets are rebuilt when it changes
     int npasses;
     rp_pass passes[RP_MAX_PASSES];
     int nparams;
@@ -59,18 +62,27 @@ typedef struct {
     int width, height, levels;
 } rp_texture;
 
-// Per-output intermediate targets for the passes before the last one.
+// Per-output intermediate targets for the passes before the last one. Persistent
+// passes have two targets: each step reads [cur] as uFeedback and writes the other.
 typedef struct {
     int width, height;              // render size of the last pass
     int npasses;
-    GLuint fbo[RP_MAX_PASSES], tex[RP_MAX_PASSES];
+    unsigned generation;            // rp_effect.generation these were built for
+    GLuint fbo[RP_MAX_PASSES][2], tex[RP_MAX_PASSES][2];
     int tw[RP_MAX_PASSES], th[RP_MAX_PASSES];
+    int cur;                        // persistent passes: index holding the latest state
+    double steps;                   // persistent steps since the state was cleared
+    double last_step_time;          // rendered time of the last step on this output
 } rp_targets;
 
 bool rp_render_init(char *err, size_t errlen);          // UBO, VAO; needs a context
+// True if the GL context can render into RGBA16F textures (pixelFormat "rgba16f").
+bool rp_render_half_float(void);
+// `step`: advance persistent passes. False when redrawing without new time (paused);
+// the last state is then reused. The first frame after a reset always steps.
 void rp_render_frame(const rp_effect *e, rp_targets *t, const rp_texture *wallpaper,
                      const float *params, double time, double frame, double delta,
-                     int width, int height);
+                     bool step, int width, int height);
 void rp_targets_release(rp_targets *t);
 GLuint rp_compile_program(const char *fragment_source, char *err, size_t errlen);
 

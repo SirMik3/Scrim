@@ -10,6 +10,7 @@ export XDG_CONFIG_HOME=/tmp/config      # don't depend on any user config
 mkdir -p /tmp/build && cp -r /src/linux/. /tmp/build/ && cd /tmp/build
 make -s clean && make -s build/scrim
 cp -r /src/effects /tmp/effects && export SCRIM_EFFECTS_DIR=/tmp/effects
+cp -r /src/linux/test/effects/. /tmp/effects/      # test-only effects (never packaged)
 for d in /tmp/effects/*/; do /src/tools/effectc "$d" >/dev/null; done
 BIN=/tmp/build/build/scrim
 ARGS=(--effect "$EFFECT" --wallpaper "$WALLPAPER" --no-pause-on-battery --stats --duration 12 ${EXTRA_ARGS:-})
