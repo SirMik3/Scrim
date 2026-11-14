@@ -4,7 +4,13 @@
 //
 // Pacing: we draw only after the compositor's frame callback, so when an output
 // is hidden, off or locked the compositor stops asking and rendering stops by itself.
+//
+// HiDPI (`hidpi = true`): with wp_fractional_scale_v1 + wp_viewporter we render at the
+// exact fractional size (e.g. 1.5x) and let the viewport map it onto the surface;
+// otherwise at the integer wl_output scale (2x for a 1.5x output, then downscaled).
 #include "rp.h"
+#include "fractional-scale-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
 #include <stdio.h>
@@ -21,6 +27,9 @@ typedef struct {
     struct zwlr_layer_surface_v1 *layer;
     struct wl_egl_window *egl_window;
     struct wl_callback *frame_cb;
+    struct wp_viewport *viewport;
+    struct wp_fractional_scale_v1 *fractional;
+    uint32_t scale120;          // preferred fractional scale x 120; 0 until known
     bool in_use;
 } wl_out;
 
@@ -28,17 +37,42 @@ static struct wl_display *display;
 static struct wl_registry *registry;
 static struct wl_compositor *compositor;
 static struct zwlr_layer_shell_v1 *layer_shell;
+static struct wp_viewporter *viewporter;
+static struct wp_fractional_scale_manager_v1 *fractional_manager;
 static wl_out outputs[RP_MAX_OUTPUTS];
 static bool hidpi;
 static bool egl_ready;
 
 static void update_render_size(wl_out *o) {
-    int s = hidpi ? o->base.scale : 1;
-    o->base.render_w = o->base.width * s;
-    o->base.render_h = o->base.height * s;
-    if (o->surface) wl_surface_set_buffer_scale(o->surface, s);
+    int old_w = o->base.render_w, old_h = o->base.render_h;
+    if (hidpi && o->viewport && o->scale120 > 0) {
+        // Fractional: buffer at the exact size (rounded half away from zero, as the
+        // protocol says), buffer scale 1, and the viewport maps it to the logical size.
+        o->base.render_w = (int)((o->base.width * o->scale120 + 60) / 120);
+        o->base.render_h = (int)((o->base.height * o->scale120 + 60) / 120);
+        if (o->surface) wl_surface_set_buffer_scale(o->surface, 1);
+        wp_viewport_set_destination(o->viewport, o->base.width, o->base.height);
+    } else {
+        int s = hidpi ? o->base.scale : 1;
+        o->base.render_w = o->base.width * s;
+        o->base.render_h = o->base.height * s;
+        if (o->surface) wl_surface_set_buffer_scale(o->surface, s);
+    }
     if (o->egl_window) wl_egl_window_resize(o->egl_window, o->base.render_w, o->base.render_h, 0, 0);
+    if (o->base.width > 0 && (o->base.render_w != old_w || o->base.render_h != old_h))
+        rp_log("wayland: output %dx%d, rendering %dx%d (%s)", o->base.width, o->base.height,
+               o->base.render_w, o->base.render_h,
+               !hidpi ? "hidpi off" : o->viewport && o->scale120 ? "fractional scale" : "integer scale");
 }
+
+static void preferred_scale(void *data, struct wp_fractional_scale_v1 *f, uint32_t scale120) {
+    (void)f;
+    wl_out *o = data;
+    if (o->scale120 == scale120) return;
+    o->scale120 = scale120;
+    if (o->base.configured) { update_render_size(o); o->base.needs_redraw = true; }
+}
+static const struct wp_fractional_scale_v1_listener fractional_listener = { .preferred_scale = preferred_scale };
 
 // ---- frame callbacks ----
 
@@ -62,6 +96,9 @@ static void destroy_surface(wl_out *o) {
         o->base.egl_surface = EGL_NO_SURFACE;
     }
     if (o->egl_window) { wl_egl_window_destroy(o->egl_window); o->egl_window = NULL; }
+    if (o->fractional) { wp_fractional_scale_v1_destroy(o->fractional); o->fractional = NULL; }
+    if (o->viewport) { wp_viewport_destroy(o->viewport); o->viewport = NULL; }
+    o->scale120 = 0;
     if (o->layer) { zwlr_layer_surface_v1_destroy(o->layer); o->layer = NULL; }
     if (o->surface) { wl_surface_destroy(o->surface); o->surface = NULL; }
     o->base.configured = false;
@@ -76,7 +113,7 @@ static void layer_configure(void *data, struct zwlr_layer_surface_v1 *layer, uin
     o->base.width = (int)width;
     o->base.height = (int)height;
     if (!o->egl_window) {
-        int s = hidpi ? o->base.scale : 1;
+        int s = hidpi ? o->base.scale : 1;   // update_render_size() below picks the real size
         o->egl_window = wl_egl_window_create(o->surface, (int)width * s, (int)height * s);
         o->base.egl_surface = rp_egl_create_surface(o->egl_window);
         if (o->base.egl_surface == EGL_NO_SURFACE) { rp_log("wayland: cannot create EGL surface"); return; }
@@ -104,6 +141,11 @@ static void create_surface(wl_out *o) {
     struct wl_region *empty = wl_compositor_create_region(compositor);
     wl_surface_set_input_region(o->surface, empty);
     wl_region_destroy(empty);
+    if (hidpi && viewporter && fractional_manager) {
+        o->viewport = wp_viewporter_get_viewport(viewporter, o->surface);
+        o->fractional = wp_fractional_scale_manager_v1_get_fractional_scale(fractional_manager, o->surface);
+        wp_fractional_scale_v1_add_listener(o->fractional, &fractional_listener, o);
+    }
 
     o->layer = zwlr_layer_shell_v1_get_layer_surface(layer_shell, o->surface, o->wl_output,
                                                      ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "scrim");
@@ -148,6 +190,10 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name, 
     (void)data;
     if (!strcmp(iface, wl_compositor_interface.name)) {
         compositor = wl_registry_bind(reg, name, &wl_compositor_interface, version < 4 ? version : 4);
+    } else if (!strcmp(iface, wp_viewporter_interface.name)) {
+        viewporter = wl_registry_bind(reg, name, &wp_viewporter_interface, 1);
+    } else if (!strcmp(iface, wp_fractional_scale_manager_v1_interface.name)) {
+        fractional_manager = wl_registry_bind(reg, name, &wp_fractional_scale_manager_v1_interface, 1);
     } else if (!strcmp(iface, zwlr_layer_shell_v1_interface.name)) {
         layer_shell = wl_registry_bind(reg, name, &zwlr_layer_shell_v1_interface, version < 4 ? version : 4);
     } else if (!strcmp(iface, wl_output_interface.name)) {
@@ -252,6 +298,10 @@ static void wl_shutdown(void) {
         wl_output_destroy(outputs[i].wl_output);
     }
     if (layer_shell) zwlr_layer_shell_v1_destroy(layer_shell);
+    if (fractional_manager) wp_fractional_scale_manager_v1_destroy(fractional_manager);
+    if (viewporter) wp_viewporter_destroy(viewporter);
+    fractional_manager = NULL;
+    viewporter = NULL;
     if (compositor) wl_compositor_destroy(compositor);
     if (registry) wl_registry_destroy(registry);
     layer_shell = NULL;

@@ -19,12 +19,15 @@ RP_CFLAGS  := -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Ibuild
 RP_LIBS    := $(PKG_LIBS) -lm
 
 WAYLAND_SCANNER := $(shell pkg-config --variable=wayland_scanner wayland-scanner)
-XDG_SHELL_XML   := $(shell pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml
+WL_PROTOCOLS    := $(shell pkg-config --variable=pkgdatadir wayland-protocols)
+XDG_SHELL_XML   := $(WL_PROTOCOLS)/stable/xdg-shell/xdg-shell.xml
+VIEWPORTER_XML  := $(WL_PROTOCOLS)/stable/viewporter/viewporter.xml
+FRACTIONAL_XML  := $(WL_PROTOCOLS)/staging/fractional-scale/fractional-scale-v1.xml
 LAYER_SHELL_XML := protocols/wlr-layer-shell-unstable-v1.xml
 
-GEN_HEADERS := build/wlr-layer-shell-unstable-v1-client-protocol.h build/xdg-shell-client-protocol.h
-OBJS := $(patsubst src/%.c,build/%.o,$(wildcard src/*.c)) \
-        build/wlr-layer-shell-unstable-v1-protocol.o build/xdg-shell-protocol.o
+PROTOCOLS   := wlr-layer-shell-unstable-v1 xdg-shell viewporter fractional-scale-v1
+GEN_HEADERS := $(patsubst %,build/%-client-protocol.h,$(PROTOCOLS))
+OBJS := $(patsubst src/%.c,build/%.o,$(wildcard src/*.c)) $(patsubst %,build/%-protocol.o,$(PROTOCOLS))
 EFFECTS ?= ../effects
 TOOLS   ?= ../tools
 
@@ -52,6 +55,14 @@ build/wlr-layer-shell-unstable-v1-protocol.c: $(LAYER_SHELL_XML) | build
 build/xdg-shell-client-protocol.h: $(XDG_SHELL_XML) | build
 	$(WAYLAND_SCANNER) client-header $< $@
 build/xdg-shell-protocol.c: $(XDG_SHELL_XML) | build
+	$(WAYLAND_SCANNER) private-code $< $@
+build/viewporter-client-protocol.h: $(VIEWPORTER_XML) | build
+	$(WAYLAND_SCANNER) client-header $< $@
+build/viewporter-protocol.c: $(VIEWPORTER_XML) | build
+	$(WAYLAND_SCANNER) private-code $< $@
+build/fractional-scale-v1-client-protocol.h: $(FRACTIONAL_XML) | build
+	$(WAYLAND_SCANNER) client-header $< $@
+build/fractional-scale-v1-protocol.c: $(FRACTIONAL_XML) | build
 	$(WAYLAND_SCANNER) private-code $< $@
 
 effects:

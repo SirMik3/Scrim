@@ -97,6 +97,7 @@ you save the file**:
 ```ini
 effect = rain
 fps = 30
+hidpi = false                       # true: full resolution, incl. fractional scales (1.5x)
 pause_on_battery = true
 wallpaper = ~/Pictures/lake.jpg     # JPEG or PNG; detected from your desktop if unset
 

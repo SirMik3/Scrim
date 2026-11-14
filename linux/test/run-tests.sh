@@ -14,7 +14,7 @@ cp -r /src/linux/test/effects/. /tmp/effects/      # test-only effects (never pa
 for d in /tmp/effects/*/; do /src/tools/effectc "$d" >/dev/null; done
 BIN=/tmp/build/build/scrim
 ARGS=(--effect "$EFFECT" --wallpaper "$WALLPAPER" --no-pause-on-battery --stats --duration 12 ${EXTRA_ARGS:-})
-BACKENDS=${BACKENDS:-"snapshot wallpaper pausing control x11 wayland"}
+BACKENDS=${BACKENDS:-"snapshot wallpaper pausing control x11 fractional wayland"}
 export XDG_RUNTIME_DIR=/tmp/xdg && mkdir -p -m 700 $XDG_RUNTIME_DIR
 
 # expect PATTERN COMMAND...: runs COMMAND, fails the test unless its output matches.
@@ -194,6 +194,23 @@ DISPLAY=:99 xwd -root -silent | convert xwd:- "/out/x11-$EFFECT.png"
 echo "screenshot: /out/x11-$EFFECT.png"
 wait $APP || true
 kill $XVFB 2>/dev/null || true
+fi
+
+if [[ $BACKENDS == *fractional* ]]; then
+echo "== Wayland fractional scaling (headless Sway at 1.5x) =="
+printf 'output HEADLESS-1 resolution 1280x800 scale 1.5\n' > /tmp/sway-frac.conf
+WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway -c /tmp/sway-frac.conf >/tmp/sway-frac.log 2>&1 &
+SWAY=$!
+for _ in $(seq 50); do [ -S $XDG_RUNTIME_DIR/wayland-1 ] && break; sleep 0.2; done
+WAYLAND_DISPLAY=wayland-1 $BIN --hidpi --wallpaper "$WALLPAPER" --no-pause-on-battery --duration 5 2>/tmp/frac.log &
+APP=$!
+sleep 4
+WAYLAND_DISPLAY=wayland-1 grim /out/wayland-fractional.png
+wait $APP || true
+kill $SWAY 2>/dev/null || true
+wait $SWAY 2>/dev/null || true
+# 1280x800 at 1.5x is 853x533 logical: render exactly 1280x800, not 2x (1706x1066).
+expect "output 853x533, rendering 1280x800 (fractional scale)" cat /tmp/frac.log
 fi
 
 if [[ $BACKENDS == *wayland* ]]; then
