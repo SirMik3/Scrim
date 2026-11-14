@@ -110,6 +110,33 @@ the command-line options, which override the file. On Wayland, rendering stops b
 when the compositor stops asking for frames: the output is covered, off or locked.
 It also pauses on battery, which is read from `/sys/class/power_supply`.
 
+### Controlling a running Scrim
+
+`scrim msg` sends a command to the running instance, so you can bind it to a key or a
+status-bar button:
+
+```sh
+scrim msg toggle            # also: pause, resume (or: kill -USR1 $(pidof scrim))
+scrim msg next              # next effect
+scrim msg effect condensation
+scrim msg param fog=0.8     # a parameter of the current effect
+scrim msg status            # effect, state, wallpaper and parameter values
+scrim msg reload            # forget msg changes and re-read the config file
+```
+
+```ini
+# Hyprland
+bind = SUPER, F9, exec, scrim msg toggle
+# Sway
+bindsym $mod+F9 exec scrim msg toggle
+```
+
+Changes made with `scrim msg` last until `reload` or a restart; to keep one, put it in
+the config file. Editing a setting in the file overrides an earlier `msg` change to
+that same setting. `paused = true` in the file pauses too. Only one Scrim runs per
+user: a second one exits straight away (with status 0, so a systemd unit doesn't
+keep retrying). The socket is `$XDG_RUNTIME_DIR/scrim.sock`.
+
 **Not done yet on Linux:** a tray icon or settings window, reading the wallpaper of
 desktops other than GNOME/Cinnamon (set `wallpaper =` instead), and formats other
 than JPEG/PNG.

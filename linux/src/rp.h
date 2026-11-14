@@ -50,6 +50,8 @@ typedef struct {
 int rp_effect_dirs(char dirs[][PATH_MAX], int max);
 bool rp_effect_load(rp_effect *e, const char *dir, char *err, size_t errlen);
 bool rp_effect_find(rp_effect *e, const char *id, char *err, size_t errlen);
+// Sorted, unique ids of every loadable effect. Returns the count.
+int rp_effect_ids(char ids[][64], int max);
 void rp_effect_print_all(void);
 // Needs a current GL context. Compiles every pass from build/<stem>.gles.
 bool rp_effect_compile(rp_effect *e, char *err, size_t errlen);
@@ -108,6 +110,7 @@ typedef struct {
     int fps;
     bool hidpi;
     bool pause_on_battery;
+    bool paused;                // paused by the user (config `paused`)
     char wallpaper[PATH_MAX];
     int nvalues;
     rp_param_value values[128];
@@ -120,6 +123,19 @@ bool rp_config_load(rp_config *c, const char *path, char *err, size_t errlen);
 void rp_config_set_value(rp_config *c, const char *section, const char *key, const char *value);
 // Fills params[] (manifest order) from defaults + config, clamped to each range.
 void rp_config_params(const rp_config *c, const rp_effect *e, float *params);
+
+// ---- control socket (control.c) -------------------------------------------
+
+#define RP_CONTROL_RUNNING (-2)   // rp_control_listen: another instance owns the socket
+typedef void (*rp_control_handler)(const char *command, char *reply, size_t len);
+void rp_control_path(char *out, size_t len);
+// Listening socket for `scrim msg` (non-blocking), -1 if unavailable, or RP_CONTROL_RUNNING.
+int rp_control_listen(void);
+// Serves every pending client: one command line each, answered by `handler`.
+void rp_control_accept(int listen_fd, rp_control_handler handler);
+void rp_control_close(int listen_fd);
+// `scrim msg ARGS...`: sends a command to the running instance. Returns an exit code.
+int rp_control_client(int argc, char **argv);
 
 // ---- power (power.c) -------------------------------------------------------
 
