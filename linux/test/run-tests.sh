@@ -78,6 +78,18 @@ fake swww "echo 'eDP-1: 1920x1080, scale: 1, currently displaying: color: 000000
 expect "hypr.jpg (from hyprpaper)" detect $H                           # swww shows a colour: skip it
 kill $P1 $P2 $P3 2>/dev/null || true
 
+echo "-- image formats (recognised by content, not name)"
+cwebp -quiet -q 90 "$WALLPAPER" -o /tmp/wp/real.webp
+cp /tmp/wp/real.webp /tmp/wp/webp-named.jpg
+convert "$WALLPAPER" -resize 1280x /tmp/wp/png-named.webp
+SNAP=(--effect plain --size 640x400 --time 0)
+$BIN --snapshot /tmp/from-jpg.png --wallpaper "$WALLPAPER" "${SNAP[@]}" >/dev/null
+for f in real.webp webp-named.jpg png-named.webp; do
+    $BIN --snapshot /tmp/from-$f.png --wallpaper /tmp/wp/$f "${SNAP[@]}" 2>&1 | grep -i "cannot" && exit 1
+    psnr=$(compare -metric PSNR /tmp/from-jpg.png /tmp/from-$f.png null: 2>&1 | cut -d' ' -f1 || true)
+    awk -v p="$psnr" -v f="$f" 'BEGIN { if (p + 0 < 30) { print "FAILED: " f " looks different (PSNR " p ")"; exit 1 } print "ok: " f " matches the JPEG (PSNR " p " dB)" }'
+done
+
 echo "-- following a wallpaper change while running"
 Xvfb :97 -screen 0 320x200x24 >/dev/null 2>&1 &
 XV=$!

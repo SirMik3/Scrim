@@ -86,14 +86,14 @@ Scrim falls back to X11 through XWayland, but it may end up above the desktop.
 # Debian/Ubuntu (tested on Debian 13)
 sudo apt install build-essential pkg-config python3 glslang-tools spirv-cross \
     libwayland-dev wayland-protocols libegl-dev libgles-dev libx11-dev libxrandr-dev \
-    libxfixes-dev libxext-dev libjson-c-dev libpng-dev libjpeg-dev
+    libxfixes-dev libxext-dev libjson-c-dev libpng-dev libjpeg-dev libwebp-dev
 # Fedora (untested)
 sudo dnf install gcc make pkgconf python3 glslang spirv-tools spirv-cross \
     wayland-devel wayland-protocols-devel mesa-libEGL-devel mesa-libGLES-devel \
-    libX11-devel libXrandr-devel libXfixes-devel libXext-devel json-c-devel libpng-devel libjpeg-turbo-devel
+    libX11-devel libXrandr-devel libXfixes-devel libXext-devel json-c-devel libpng-devel libjpeg-turbo-devel libwebp-devel
 # Arch (untested)
 sudo pacman -S base-devel python glslang spirv-cross wayland wayland-protocols \
-    libglvnd libx11 libxrandr libxfixes libxext json-c libpng libjpeg-turbo
+    libglvnd libx11 libxrandr libxfixes libxext json-c libpng libjpeg-turbo libwebp
 
 cd linux
 make run                         # run from the source tree
@@ -111,7 +111,7 @@ effect = rain
 fps = 30
 hidpi = false                       # true: full resolution, incl. fractional scales (1.5x)
 pause_on_battery = true
-wallpaper = ~/Pictures/lake.jpg     # JPEG or PNG; detected from your desktop if unset
+wallpaper = ~/Pictures/lake.jpg     # JPEG, PNG or WebP; detected from your desktop if unset
 
 [rain]
 fog = 0.4
@@ -166,8 +166,7 @@ that same setting. `paused = true` in the file pauses too. Only one Scrim runs p
 user: a second one exits straight away (with status 0, so a systemd unit doesn't
 keep retrying). The socket is `$XDG_RUNTIME_DIR/scrim.sock`.
 
-**Not done yet on Linux:** a tray icon or settings window, and image formats other
-than JPEG/PNG.
+**Not done yet on Linux:** a tray icon or settings window, and AVIF/JPEG XL wallpapers.
 
 ### Testing without a Linux machine
 

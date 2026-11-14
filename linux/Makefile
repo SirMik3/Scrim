@@ -10,7 +10,7 @@ PREFIX  ?= /usr/local
 DATADIR ?= $(PREFIX)/share/scrim
 RELEASE ?= 0
 
-PKGS       := wayland-client wayland-egl egl glesv2 x11 xrandr xfixes xext json-c libpng libjpeg
+PKGS       := wayland-client wayland-egl egl glesv2 x11 xrandr xfixes xext json-c libpng libjpeg libwebp
 PKG_CFLAGS := $(shell pkg-config --cflags $(PKGS))
 PKG_LIBS   := $(shell pkg-config --libs $(PKGS))
 CFLAGS     ?= -O2 -g
