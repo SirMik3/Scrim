@@ -111,6 +111,7 @@ typedef struct {
     int fps;
     bool hidpi;
     bool pause_on_battery;
+    bool pause_on_power_saver;
     bool paused;                // paused by the user (config `paused`)
     char wallpaper[PATH_MAX];
     int nvalues;
@@ -141,6 +142,7 @@ int rp_control_client(int argc, char **argv);
 // ---- power (power.c) -------------------------------------------------------
 
 bool rp_on_battery(void);
+bool rp_power_saver(void);      // power-profiles-daemon's "power-saver" profile
 
 // ---- display backends (wayland.c, x11.c) -----------------------------------
 
@@ -167,6 +169,7 @@ typedef struct {
     int (*count)(void);
     rp_output *(*output)(int i);
     void (*before_swap)(rp_output *o);
+    bool (*screens_off)(void);  // optional: the displays are blanked (X11 DPMS)
     void (*shutdown)(void);     // destroys surfaces/windows (EGL still alive)
     void (*disconnect)(void);   // closes the display connection (after eglTerminate)
 } rp_backend;

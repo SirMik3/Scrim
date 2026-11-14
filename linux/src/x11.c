@@ -2,6 +2,10 @@
 // desktop (_NET_WM_WINDOW_TYPE_DESKTOP) so window managers keep it below
 // everything. Best with WMs that don't run their own desktop-icon window
 // (i3, bspwm, Openbox, ...); a file manager drawing the desktop may cover it.
+//
+// An output stops drawing when it is fully obscured (VisibilityNotify; compositing
+// WMs never report that), when the active window is fullscreen on it (EWMH, works
+// under compositors too), or when DPMS has blanked the screens.
 #include "rp.h"
 
 #include <X11/Xatom.h>
@@ -9,6 +13,7 @@
 #include <X11/Xutil.h>
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/Xrandr.h>
+#include <X11/extensions/dpms.h>
 #include <X11/extensions/shape.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +22,9 @@
 typedef struct {
     rp_output base;
     Window window;
+    int x, y;                   // position on the root window
+    bool visible;               // not fully obscured (VisibilityNotify)
+    bool fullscreen_covered;    // the active window is fullscreen over this output
     bool in_use;
 } x_out;
 
@@ -25,6 +33,94 @@ static Window root;
 static int randr_event_base = -1;
 static x_out outputs[RP_MAX_OUTPUTS];
 static EGLConfig egl_config;
+static Atom net_active_window, net_wm_state, net_wm_state_fullscreen;
+static Window active_window = None;
+
+// The active window can vanish between an event and our query of it; Xlib's
+// default handler would exit the process on the resulting BadWindow.
+static int ignore_x_errors(Display *d, XErrorEvent *e) {
+    (void)d;
+    if (e->error_code != BadWindow && e->error_code != BadDrawable && e->error_code != BadMatch)
+        rp_log("x11: X error %d (request %d)", e->error_code, e->request_code);
+    return 0;
+}
+
+static void update_can_draw(x_out *o) {
+    bool before = o->base.can_draw;
+    o->base.can_draw = o->visible && !o->fullscreen_covered;
+    if (o->base.can_draw && !before) o->base.needs_redraw = true;
+}
+
+static bool window_is_fullscreen(Window w) {
+    Atom type;
+    int format;
+    unsigned long n = 0, after;
+    unsigned char *data = NULL;
+    if (XGetWindowProperty(dpy, w, net_wm_state, 0, 64, False, AnyPropertyType, &type, &format, &n, &after,
+                           &data) != Success || !data)
+        return false;
+    bool fullscreen = false;
+    if (format == 32)
+        for (unsigned long i = 0; i < n; i++) fullscreen |= ((Atom *)data)[i] == net_wm_state_fullscreen;
+    XFree(data);
+    return fullscreen;
+}
+
+// Pauses the outputs that the active window covers while it is fullscreen.
+static void update_fullscreen(void) {
+    int wx = 0, wy = 0;
+    unsigned ww = 0, wh = 0;
+    bool fullscreen = active_window != None && window_is_fullscreen(active_window);
+    if (fullscreen) {
+        XWindowAttributes a;
+        Window child;
+        if (XGetWindowAttributes(dpy, active_window, &a) &&
+            XTranslateCoordinates(dpy, active_window, root, 0, 0, &wx, &wy, &child)) {
+            ww = (unsigned)a.width;
+            wh = (unsigned)a.height;
+        } else {
+            fullscreen = false;
+        }
+    }
+    for (int i = 0; i < RP_MAX_OUTPUTS; i++) {
+        x_out *o = &outputs[i];
+        if (!o->in_use) continue;
+        bool covered = false;
+        if (fullscreen) {
+            long ix = (long)(wx > o->x ? wx : o->x), iy = (long)(wy > o->y ? wy : o->y);
+            long ex = (long)wx + (long)ww, ey = (long)wy + (long)wh;
+            long ox = (long)o->x + o->base.width, oy = (long)o->y + o->base.height;
+            long iw = (ex < ox ? ex : ox) - ix, ih = (ey < oy ? ey : oy) - iy;
+            covered = iw > 0 && ih > 0 && iw * ih >= (long)o->base.width * o->base.height * 9 / 10;
+        }
+        if (covered != o->fullscreen_covered) {
+            rp_log(covered ? "x11: output %d is covered by a fullscreen window: pausing it"
+                           : "x11: output %d is no longer covered by a fullscreen window", i);
+            o->fullscreen_covered = covered;
+            update_can_draw(o);
+        }
+    }
+}
+
+// Follows _NET_ACTIVE_WINDOW, watching the active window for state/geometry changes.
+static void track_active_window(void) {
+    Atom type;
+    int format;
+    unsigned long n = 0, after;
+    unsigned char *data = NULL;
+    Window w = None;
+    if (XGetWindowProperty(dpy, root, net_active_window, 0, 1, False, AnyPropertyType, &type, &format, &n,
+                           &after, &data) == Success && data) {
+        if (n == 1 && format == 32) w = (Window)((unsigned long *)data)[0];
+        XFree(data);
+    }
+    if (w != active_window) {
+        if (active_window != None) XSelectInput(dpy, active_window, NoEventMask);
+        active_window = w;
+        if (w != None) XSelectInput(dpy, w, PropertyChangeMask | StructureNotifyMask);
+    }
+    update_fullscreen();
+}
 
 static void destroy_windows(void) {
     eglMakeCurrent(rp_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, rp_egl_context);
@@ -41,6 +137,9 @@ static void destroy_windows(void) {
 static void create_window(int idx, int x, int y, int w, int h) {
     x_out *o = &outputs[idx];
     memset(o, 0, sizeof *o);
+    o->x = x;
+    o->y = y;
+    o->visible = true;
 
     EGLint visual_id = 0;
     eglGetConfigAttrib(rp_egl_display, egl_config, EGL_NATIVE_VISUAL_ID, &visual_id);
@@ -111,6 +210,7 @@ static void create_windows(void) {
         create_window(0, 0, 0, ra.width, ra.height);
     }
     if (mons) XRRFreeMonitors(mons);
+    track_active_window();
     XFlush(dpy);
 }
 
@@ -119,6 +219,11 @@ static bool x_init(bool hidpi, char *err, size_t errlen) {
     dpy = XOpenDisplay(NULL);
     if (!dpy) { snprintf(err, errlen, "cannot open X display"); return false; }
     root = DefaultRootWindow(dpy);
+    XSetErrorHandler(ignore_x_errors);
+    net_active_window = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
+    net_wm_state = XInternAtom(dpy, "_NET_WM_STATE", False);
+    net_wm_state_fullscreen = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
+    XSelectInput(dpy, root, PropertyChangeMask);
     int event_base, error_base;
     if (XRRQueryExtension(dpy, &event_base, &error_base)) {
         randr_event_base = event_base;
@@ -155,6 +260,16 @@ static void x_after_poll(bool readable) {
             rebuild = true;
             continue;
         }
+        if (ev.type == PropertyNotify) {
+            if (ev.xproperty.window == root && ev.xproperty.atom == net_active_window) track_active_window();
+            else if (ev.xproperty.window == active_window && ev.xproperty.atom == net_wm_state) update_fullscreen();
+            continue;
+        }
+        if (ev.xany.window == active_window && active_window != None) {
+            if (ev.type == DestroyNotify) active_window = None;
+            if (ev.type == ConfigureNotify || ev.type == DestroyNotify) update_fullscreen();
+            continue;
+        }
         for (int i = 0; i < RP_MAX_OUTPUTS; i++) {
             x_out *o = &outputs[i];
             if (!o->in_use || o->window != ev.xany.window) continue;
@@ -165,8 +280,8 @@ static void x_after_poll(bool readable) {
             case VisibilityNotify:
                 // Fully covered (e.g. a fullscreen window): stop drawing. Compositing WMs
                 // may always report "unobscured"; then we just keep drawing.
-                o->base.can_draw = ev.xvisibility.state != VisibilityFullyObscured;
-                if (o->base.can_draw) o->base.needs_redraw = true;
+                o->visible = ev.xvisibility.state != VisibilityFullyObscured;
+                update_can_draw(o);
                 break;
             case ConfigureNotify:
                 if (ev.xconfigure.width != o->base.width || ev.xconfigure.height != o->base.height) {
@@ -188,6 +303,14 @@ static int x_count(void) { return RP_MAX_OUTPUTS; }
 static rp_output *x_output_at(int i) { return outputs[i].in_use ? &outputs[i].base : NULL; }
 static void x_before_swap(rp_output *o) { (void)o; }
 
+static bool x_screens_off(void) {
+    int event_base, error_base;
+    if (!DPMSQueryExtension(dpy, &event_base, &error_base) || !DPMSCapable(dpy)) return false;
+    CARD16 level;
+    BOOL enabled;
+    return DPMSInfo(dpy, &level, &enabled) && enabled && level != DPMSModeOn;
+}
+
 static void x_shutdown(void) { destroy_windows(); }
 
 static void x_disconnect(void) {
@@ -206,6 +329,7 @@ const rp_backend rp_x11_backend = {
     .count = x_count,
     .output = x_output_at,
     .before_swap = x_before_swap,
+    .screens_off = x_screens_off,
     .shutdown = x_shutdown,
     .disconnect = x_disconnect,
 };

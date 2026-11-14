@@ -74,14 +74,14 @@ Scrim falls back to X11 through XWayland, but it may end up above the desktop.
 # Debian/Ubuntu (tested on Debian 13)
 sudo apt install build-essential pkg-config python3 glslang-tools spirv-cross \
     libwayland-dev wayland-protocols libegl-dev libgles-dev libx11-dev libxrandr-dev \
-    libxfixes-dev libjson-c-dev libpng-dev libjpeg-dev
+    libxfixes-dev libxext-dev libjson-c-dev libpng-dev libjpeg-dev
 # Fedora (untested)
 sudo dnf install gcc make pkgconf python3 glslang spirv-tools spirv-cross \
     wayland-devel wayland-protocols-devel mesa-libEGL-devel mesa-libGLES-devel \
-    libX11-devel libXrandr-devel libXfixes-devel json-c-devel libpng-devel libjpeg-turbo-devel
+    libX11-devel libXrandr-devel libXfixes-devel libXext-devel json-c-devel libpng-devel libjpeg-turbo-devel
 # Arch (untested)
 sudo pacman -S base-devel python glslang spirv-cross wayland wayland-protocols \
-    libglvnd libx11 libxrandr libxfixes json-c libpng libjpeg-turbo
+    libglvnd libx11 libxrandr libxfixes libxext json-c libpng libjpeg-turbo
 
 cd linux
 make run                         # run from the source tree
@@ -106,9 +106,19 @@ darken = 0.5
 ```
 
 `scrim --list` shows every effect and its parameters. `scrim --help` shows
-the command-line options, which override the file. On Wayland, rendering stops by itself
-when the compositor stops asking for frames: the output is covered, off or locked.
-It also pauses on battery, which is read from `/sys/class/power_supply`.
+the command-line options, which override the file.
+
+Scrim stops rendering when nobody can see it or power is short:
+
+- **Wayland:** when the compositor stops asking for frames, because the output is
+  covered, off or locked. Sway does this as soon as a window (tiled or fullscreen)
+  covers the whole output; with gaps the wallpaper stays visible, so Scrim keeps
+  drawing. Other compositors may differ: `scrim --stats` shows the frame rate.
+- **X11:** when its window is fully covered (not reported under compositors such as
+  picom), when the active window is fullscreen on that monitor, or when DPMS has
+  turned the screens off.
+- **On battery** (`pause_on_battery`, read from `/sys/class/power_supply`) and in the
+  **power-saver** profile of GNOME/KDE's power menu (`pause_on_power_saver`).
 
 Without `wallpaper =`, Scrim draws over the wallpaper your desktop shows. It reads it
 from swww, hyprpaper, swaybg (including Sway's `output * bg`), KDE Plasma, XFCE,

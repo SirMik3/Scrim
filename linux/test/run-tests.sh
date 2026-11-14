@@ -14,7 +14,7 @@ cp -r /src/linux/test/effects/. /tmp/effects/      # test-only effects (never pa
 for d in /tmp/effects/*/; do /src/tools/effectc "$d" >/dev/null; done
 BIN=/tmp/build/build/scrim
 ARGS=(--effect "$EFFECT" --wallpaper "$WALLPAPER" --no-pause-on-battery --stats --duration 12 ${EXTRA_ARGS:-})
-BACKENDS=${BACKENDS:-"snapshot wallpaper control x11 wayland"}
+BACKENDS=${BACKENDS:-"snapshot wallpaper pausing control x11 wayland"}
 export XDG_RUNTIME_DIR=/tmp/xdg && mkdir -p -m 700 $XDG_RUNTIME_DIR
 
 # expect PATTERN COMMAND...: runs COMMAND, fails the test unless its output matches.
@@ -91,6 +91,59 @@ wait $APP || true
 kill $XV 2>/dev/null || true
 expect "wallpaper: /tmp/wp/feh.jpg (from feh)" cat /tmp/live.log
 expect "wallpaper: /tmp/wp/nitrogen.jpg (from feh)" cat /tmp/live.log
+fi
+
+if [[ $BACKENDS == *pausing* ]]; then
+echo "== Pausing (power, fullscreen, screens off) =="
+# A fake /sys: a discharging battery and an unplugged charger.
+F=/tmp/fakesys && rm -rf $F && mkdir -p $F/sys/class/power_supply/{BAT0,AC} $F/sys/firmware/acpi
+echo Battery > $F/sys/class/power_supply/BAT0/type && echo Discharging > $F/sys/class/power_supply/BAT0/status
+echo Mains > $F/sys/class/power_supply/AC/type && echo 0 > $F/sys/class/power_supply/AC/online
+echo balanced > $F/sys/firmware/acpi/platform_profile
+Xvfb :96 -screen 0 640x400x24 +extension DPMS >/dev/null 2>&1 &
+XV=$!
+sleep 1
+export DISPLAY=:96
+SCRIM_SYS_ROOT=$F $BIN --wallpaper "$WALLPAPER" --stats --duration 60 2>/tmp/pausing.log &
+APP=$!
+for _ in $(seq 50); do [ -S $XDG_RUNTIME_DIR/scrim.sock ] && break; sleep 0.1; done
+sleep 0.5
+expect "state: on battery: paused" $BIN msg status
+expect "running (but on battery: paused)" $BIN msg resume
+echo 1 > $F/sys/class/power_supply/AC/online && sleep 5.5
+expect "state: running" $BIN msg status
+echo low-power > $F/sys/firmware/acpi/platform_profile && sleep 5.5
+expect "state: power saver: paused" $BIN msg status
+echo balanced > $F/sys/firmware/acpi/platform_profile
+mkdir -p $F/var/lib/power-profiles-daemon && printf '[State]\nProfile=power-saver\n' > $F/var/lib/power-profiles-daemon/state.ini && sleep 5.5
+expect "state: power saver: paused" $BIN msg status
+rm $F/var/lib/power-profiles-daemon/state.ini && sleep 5.5
+expect "state: running" $BIN msg status
+
+# The active window goes fullscreen over the whole screen (EWMH, as a WM would set it).
+xclock -geometry 640x400+0+0 & CLOCK=$!
+sleep 1
+W=$(xwininfo -name xclock -int | sed -n 's/.*Window id: \([0-9]*\).*/\1/p')
+xprop -root -f _NET_ACTIVE_WINDOW 32c -set _NET_ACTIVE_WINDOW "$W"
+xprop -id "$W" -f _NET_WM_STATE 32a -set _NET_WM_STATE _NET_WM_STATE_FULLSCREEN && sleep 0.5
+expect "covered by a fullscreen window: pausing it" cat /tmp/pausing.log
+xprop -id "$W" -remove _NET_WM_STATE && sleep 0.5
+expect "no longer covered by a fullscreen window" cat /tmp/pausing.log
+kill $CLOCK && sleep 0.5                         # the active window vanishes: no crash
+expect "state: running" $BIN msg status
+
+if xset q | grep -q "DPMS is"; then
+    xset dpms force off && sleep 5.5
+    expect "state: screens off: paused" $BIN msg status
+    xset dpms force on && sleep 5.5
+    expect "state: running" $BIN msg status
+else
+    echo "skipped: this X server has no DPMS (Xvfb), so 'screens off' isn't tested here"
+fi
+kill $APP && wait $APP || true
+grep -E "paused|resumed|x11:" /tmp/pausing.log | sed 's/^/  log: /'
+kill $XV 2>/dev/null || true
+unset DISPLAY
 fi
 
 if [[ $BACKENDS == *control* ]]; then

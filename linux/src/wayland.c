@@ -275,6 +275,7 @@ const rp_backend rp_wayland_backend = {
     .count = wl_count,
     .output = wl_output_at,
     .before_swap = wl_before_swap,
+    .screens_off = NULL,   // the compositor stops frame callbacks for blanked outputs
     .shutdown = wl_shutdown,
     .disconnect = wl_disconnect,
 };

@@ -163,7 +163,7 @@ static struct timespec wallpaper_mtime;
 static const rp_backend *backend;
 static int timer_fd = -1;
 static bool outputs_ready;
-static bool on_battery;
+static bool on_battery, power_saver, screens_off;
 static bool pause_dirty;            // pause state may have changed outside the timer tick
 
 // Changes made with `scrim msg` (newest of all sources) until `reload` or a restart.
@@ -218,6 +218,7 @@ static void write_template(const char *path) {
         "# Scrim settings. Changes apply as soon as you save this file.\n"
         "# Run `scrim --list` to see every effect and its parameters.\n\n"
         "# effect = rain\n# fps = 30\n# hidpi = false\n# pause_on_battery = true\n"
+        "# pause_on_power_saver = true\n"
         "# paused = false   (also: `scrim msg pause|resume|toggle`, or kill -USR1)\n"
         "# wallpaper = ~/Pictures/your-image.jpg   (default: detected from your desktop,\n"
         "#             see `scrim --print-wallpaper`)\n\n");
@@ -349,6 +350,15 @@ static bool apply_settings(bool first) {
 
 static bool user_paused(void) { return runtime.paused >= 0 ? runtime.paused : cfg.paused; }
 
+// Why rendering is paused right now ("" if it isn't).
+static const char *pause_reason_now(void) {
+    if (user_paused()) return "paused";
+    if (cfg.pause_on_battery && on_battery) return "on battery: paused";
+    if (cfg.pause_on_power_saver && power_saver) return "power saver: paused";
+    if (screens_off) return "screens off: paused";
+    return "";
+}
+
 static void set_user_paused(bool paused) {
     runtime.paused = paused;
     pause_dirty = true;
@@ -376,7 +386,9 @@ static void handle_command(const char *line, char *reply, size_t len) {
     if (!strcmp(cmd, "pause") || !strcmp(cmd, "resume") || !strcmp(cmd, "toggle")) {
         bool p = !strcmp(cmd, "pause") ? true : !strcmp(cmd, "resume") ? false : !user_paused();
         set_user_paused(p);
-        snprintf(reply, len, "%s\n", p ? "paused" : cfg.pause_on_battery && on_battery ? "running (but paused on battery)" : "running");
+        const char *other = pause_reason_now();
+        if (p || !other[0]) snprintf(reply, len, "%s\n", p ? "paused" : "running");
+        else snprintf(reply, len, "running (but %s)\n", other);
     } else if (!strcmp(cmd, "effect") && arg[0]) {
         switch_effect(arg, reply, len);
     } else if (!strcmp(cmd, "next")) {
@@ -415,7 +427,7 @@ static void handle_command(const char *line, char *reply, size_t len) {
         snprintf(reply, len, "reloaded\n");
     } else if (!strcmp(cmd, "status")) {
         size_t n = 0;
-        const char *state = user_paused() ? "paused" : cfg.pause_on_battery && on_battery ? "paused (on battery)" : "running";
+        const char *state = pause_reason_now()[0] ? pause_reason_now() : "running";
         n += (size_t)snprintf(reply + n, len - n, "effect: %s (%s)\nstate: %s\nfps: %d\nwallpaper: %s\n",
                               effect.id, effect.name, state, cfg.fps, wallpaper_loaded[0] ? wallpaper_loaded : "(none)");
         for (int i = 0; i < effect.nparams && n < len; i++) {
@@ -590,14 +602,19 @@ int main(int argc, char **argv) {
         if (read(timer_fd, &expirations, sizeof expirations) < 0) continue;
 
         double now = now_seconds();
-        if (now >= battery_at) { on_battery = rp_on_battery(); battery_at = now + 5; }
+        if (now >= battery_at) {
+            on_battery = rp_on_battery();
+            power_saver = rp_power_saver();
+            screens_off = backend->screens_off && backend->screens_off();
+            battery_at = now + 5;
+        }
         // Follow the wallpaper: a changed setting in the desktop, an edited file, or
         // (checked every tick, it's cheap) a bigger output after a monitor change.
         if (now >= wallpaper_at || max_output_side() != wallpaper_side) {
             refresh_wallpaper();
             wallpaper_at = now + 10;
         }
-        const char *reason = user_paused() ? "paused" : cfg.pause_on_battery && on_battery ? "on battery: paused" : "";
+        const char *reason = pause_reason_now();
         bool paused = reason[0] != 0;
         if (strcmp(reason, pause_reason) != 0) {
             rp_log("%s", paused ? reason : "resumed");
