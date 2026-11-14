@@ -13,5 +13,12 @@
     <key>LSUIElement</key>                 <true/>
     <key>NSHighResolutionCapable</key>     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key> <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>     <string>app.scrim.Scrim</string>
+            <key>CFBundleURLSchemes</key>  <array><string>scrim</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>

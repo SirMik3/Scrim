@@ -9,6 +9,8 @@ final class PowerPolicy {
     private(set) var sessionInactive = false
     private(set) var screenLocked = false
     private(set) var lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+    /// The Mac is hot enough that macOS asks apps to cut back (serious or critical).
+    private(set) var thermalPressure = PowerPolicy.readThermalPressure()
     private(set) var onBattery = PowerPolicy.readOnBattery()
 
     var onChange: (() -> Void)?
@@ -17,7 +19,8 @@ final class PowerPolicy {
     private static let powerSourceChanged = Notification.Name("ScrimPowerSourceChanged")
 
     func shouldPause(pauseOnBattery: Bool) -> Bool {
-        screensAsleep || sessionInactive || screenLocked || lowPowerMode || (pauseOnBattery && onBattery)
+        screensAsleep || sessionInactive || screenLocked || lowPowerMode || thermalPressure
+            || (pauseOnBattery && onBattery)
     }
 
     func start() {
@@ -33,6 +36,9 @@ final class PowerPolicy {
 
         observe(NotificationCenter.default, .NSProcessInfoPowerStateDidChange) {
             $0.lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+        }
+        observe(NotificationCenter.default, ProcessInfo.thermalStateDidChangeNotification) {
+            $0.thermalPressure = Self.readThermalPressure()
         }
         observe(NotificationCenter.default, Self.powerSourceChanged) { $0.onBattery = Self.readOnBattery() }
 
@@ -54,6 +60,13 @@ final class PowerPolicy {
                 self.onChange?()
             }
         })
+    }
+
+    private static func readThermalPressure() -> Bool {
+        switch ProcessInfo.processInfo.thermalState {
+        case .serious, .critical: return true
+        default: return false
+        }
     }
 
     private static func readOnBattery() -> Bool {

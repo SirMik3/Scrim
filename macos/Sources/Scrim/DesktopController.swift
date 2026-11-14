@@ -100,8 +100,8 @@ final class DesktopController {
     private func logDebugState() {
         let p = power
         NSLog("Scrim debug: footprint %.1f MB", physicalFootprintMB())
-        NSLog("Scrim debug: userPaused=%d asleep=%d inactive=%d locked=%d lowPower=%d battery=%d pauseOnBattery=%d",
-              settings.userPaused, p.screensAsleep, p.sessionInactive, p.screenLocked, p.lowPowerMode,
+        NSLog("Scrim debug: userPaused=%d asleep=%d inactive=%d locked=%d lowPower=%d thermal=%d battery=%d pauseOnBattery=%d",
+              settings.userPaused, p.screensAsleep, p.sessionInactive, p.screenLocked, p.lowPowerMode, p.thermalPressure,
               p.onBattery, settings.pauseOnBattery)
         for (id, slot) in slots {
             NSLog("Scrim debug: display %u visible=%d paused=%d fps=%.1f drawable=%.0fx%.0f",
@@ -144,6 +144,17 @@ final class DesktopController {
         } catch {
             lastError = "\(effect.name): \(error.localizedDescription)"
             NSLog("Scrim: %@", lastError!)
+        }
+    }
+
+    /// The next effect in menu order (skipping any that fail to load), wrapping around.
+    func selectNextEffect() {
+        guard !effects.isEmpty else { return }
+        let start = effects.firstIndex { $0.id == current?.effect.id } ?? -1
+        for k in 1...effects.count {
+            let effect = effects[(start + k) % effects.count]
+            selectEffect(effect)
+            if current?.effect.id == effect.id { return }
         }
     }
 

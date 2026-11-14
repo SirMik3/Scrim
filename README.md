@@ -57,7 +57,18 @@ The menu-bar icon (a cloud) lets you:
 - turn on "Pause on Battery" and "Launch at Login"
 
 It pauses when the desktop is fully covered, when the screens sleep or lock, in Low
-Power Mode, and on battery (optional, on by default). When paused it leaves a still frame.
+Power Mode, when the Mac is running hot (thermal state "serious" or worse), and on
+battery (optional, on by default). When paused it leaves a still frame.
+
+`scrim://` links control it from the Terminal, the Shortcuts app ("Open URL"), Raycast
+and the like. Changes are saved, as if made from the menu:
+
+```sh
+open scrim://toggle                  # also: pause, resume
+open scrim://next                    # next effect
+open scrim://effect/condensation
+open "scrim://param?fog=0.8&drops=0.3"
+```
 
 `build.sh` uses `swiftc` directly, so Xcode isn't needed. If the default SDK doesn't
 match the installed Swift compiler (partly updated Command Line Tools), it falls back
@@ -186,7 +197,8 @@ at a folder. Read the portability rules in the spec. Format 2 adds *persistent p
 read their own output from the previous frame; `effects/condensation` is a small example. In particular, never call
 `smoothstep` with its edges reversed: Metal tolerates it, Mesa doesn't.
 
-macOS: `SCRIM_DEBUG=1` logs the frame rate, pause reasons and memory every 5 s.
+macOS: `SCRIM_DEBUG=1` logs the frame rate, pause reasons and memory every 5 s, and
+`macos/test.sh` runs the unit tests.
 Linux: `scrim --stats` does the same.
 
 ## Building packages and releasing
