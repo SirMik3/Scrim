@@ -1,7 +1,8 @@
 # Scrim
 
 A lightweight live-wallpaper app for macOS and Linux. It lays animated shader effects over
-your existing wallpaper. The first effects are rain; more are planned. The name comes from
+your existing wallpaper: Rain, Snow, Condensation (fogged glass that drops wipe clear)
+and Rain on Glass, with more planned. The name comes from
 theatre, where a scrim is a gauze backdrop that lighting effects are played onto.
 
 - **Effects** (`effects/`): portable GLSL shader passes plus a `manifest.json`. The
@@ -187,6 +188,11 @@ macos/build/Scrim.app/Contents/MacOS/Scrim \
 linux/build/scrim --snapshot out.png --effect rain --time 12 --size 1280x800  # Linux
 ```
 
+While Scrim runs, it reloads the current effect whenever `tools/effectc` rebuilds it, so
+you can edit a shader, rebuild, and see the result without restarting. If the new
+version doesn't compile, the old one keeps running. To rebuild on every save, use a
+file watcher, e.g. `ls effects/snow/*.frag | entr tools/effectc effects/snow`.
+
 `--snapshot` also prints the median time per frame and the memory use. On Linux it
 needs no display server (it uses headless EGL), so it works over SSH and in CI.
 Effects with persistent passes are simulated from 0 up to `--time` in steps of
@@ -268,4 +274,4 @@ Scrim is released under the [MIT License](LICENSE), with these exceptions:
 - The hash functions in `tools/prelude.glsl` are based on "Hash without Sine" by Dave
   Hoskins (MIT); keep that credit.
 
-The `rain` and `plain` effects are original work under MIT.
+The `rain`, `snow`, `condensation` and `plain` effects are original work under MIT.

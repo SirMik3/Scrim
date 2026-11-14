@@ -98,6 +98,7 @@ final class GPU {
     }
 
     func clearCache() { cache.removeAll() }
+    func forget(_ effectID: String) { cache[effectID] = nil }
 }
 
 struct CompiledEffect {

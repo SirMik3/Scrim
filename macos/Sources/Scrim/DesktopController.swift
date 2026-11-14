@@ -58,6 +58,8 @@ final class DesktopController {
     private var slots: [CGDirectDisplayID: Slot] = [:]
     private var tokens: [NSObjectProtocol] = []
     private var refreshTimer: Timer?
+    private var effectWatcher: DispatchSourceFileSystemObject?
+    private var pendingReload: DispatchWorkItem?
 
     /// True when some screen's wallpaper couldn't be read (e.g. an Aerial) and a fallback is shown.
     var wallpaperUnreadable: Bool { slots.values.contains { !$0.readable } }
@@ -138,12 +140,58 @@ final class DesktopController {
             current = compiled
             lastError = nil
             settings.effectID = effect.id
+            watchCurrentEffect()
             for slot in slots.values { slot.renderer.setEffect(compiled) }
             applyParams()
             if slots.isEmpty { rebuildScreens() }
         } catch {
             lastError = "\(effect.name): \(error.localizedDescription)"
             NSLog("Scrim: %@", lastError!)
+        }
+    }
+
+    // MARK: Hot reload
+
+    /// Watches the current effect's build/ folder, so an effect rebuilt with
+    /// tools/effectc (which renames its outputs into place) shows up without a restart.
+    private func watchCurrentEffect() {
+        effectWatcher?.cancel()
+        effectWatcher = nil
+        guard let effect = current?.effect else { return }
+        let fd = open(effect.directory.appendingPathComponent("build").path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename],
+                                                               queue: .main)
+        source.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.scheduleEffectReload() } }
+        source.setCancelHandler { Darwin.close(fd) }
+        source.resume()
+        effectWatcher = source
+    }
+
+    /// effectc moves several files; reload once it has finished.
+    private func scheduleEffectReload() {
+        pendingReload?.cancel()
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.reloadCurrentEffect() } }
+        pendingReload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
+    private func reloadCurrentEffect() {
+        guard let old = current?.effect else { return }
+        do {
+            let effect = try Effect(directory: old.directory)
+            gpu.forget(effect.id)
+            let compiled = try gpu.compiled(effect)
+            if let i = effects.firstIndex(where: { $0.id == old.id }) { effects[i] = effect }
+            current = compiled
+            lastError = nil
+            for slot in slots.values { slot.renderer.setEffect(compiled) }
+            applyParams()
+            for slot in slots.values where slot.driver.isPaused { slot.view.draw() }   // show it while paused
+            NSLog("Scrim: effect %@ reloaded", effect.id)
+        } catch {
+            NSLog("Scrim: effect changed on disk but can't be loaded, keeping the running version: %@",
+                  error.localizedDescription)
         }
     }
 

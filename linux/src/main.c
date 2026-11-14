@@ -165,6 +165,9 @@ static int timer_fd = -1;
 static bool outputs_ready;
 static bool on_battery, power_saver, screens_off;
 static bool pause_dirty;            // pause state may have changed outside the timer tick
+static int ino = -1;                // inotify: the config file and the current effect
+static int effect_wd[2] = {-1, -1}; // watches on the effect folder and its build/ folder
+static double effect_reload_at;     // when to reload the changed effect (0: not pending)
 
 // Changes made with `scrim msg` (newest of all sources) until `reload` or a restart.
 static struct {
@@ -309,6 +312,40 @@ static void refresh_wallpaper(void) {
     }
 }
 
+// Watches the current effect's folder, so a rebuilt effect (tools/effectc) is
+// picked up without restarting: the shader hot-reload for effect authors.
+static void watch_effect(void) {
+    if (ino < 0) return;
+    for (int i = 0; i < 2; i++) {
+        if (effect_wd[i] >= 0) inotify_rm_watch(ino, effect_wd[i]);
+        effect_wd[i] = -1;
+    }
+    char build[PATH_MAX + 8];
+    snprintf(build, sizeof build, "%s/build", effect.dir);
+    effect_wd[0] = inotify_add_watch(ino, effect.dir, IN_CLOSE_WRITE | IN_MOVED_TO);
+    effect_wd[1] = inotify_add_watch(ino, build, IN_CLOSE_WRITE | IN_MOVED_TO);
+}
+
+// Reloads the current effect from disk; keeps the running one if the new one fails.
+static void reload_effect(void) {
+    char err[1024];
+    rp_effect e;
+    make_current_any();
+    if (!rp_effect_load(&e, effect.dir, err, sizeof err) || !rp_effect_compile(&e, err, sizeof err)) {
+        rp_effect_release(&e);
+        rp_log("effect changed on disk but can't be loaded, keeping the running version: %s", err);
+        return;
+    }
+    rp_effect_release(&effect);
+    effect = e;
+    rp_config_params(&cfg, &effect, params);
+    rp_log("effect %s reloaded", effect.id);
+    for (int i = 0; i < backend->count(); i++) {
+        rp_output *o = backend->output(i);
+        if (o) o->needs_redraw = true;
+    }
+}
+
 // Applies merged settings: effect, params, wallpaper, frame rate.
 static bool apply_settings(bool first) {
     char path[PATH_MAX], err[1024];
@@ -328,6 +365,7 @@ static bool apply_settings(bool first) {
         } else {
             if (effect.compiled) rp_effect_release(&effect);
             effect = e;
+            watch_effect();
             rp_log("effect: %s%s%s%s", effect.name, *effect.license ? " [" : "", effect.license,
                    *effect.license ? "]" : "");
         }
@@ -539,11 +577,9 @@ int main(int argc, char **argv) {
     else rp_config_path(cfg_path, sizeof cfg_path);
     snprintf(cfg_dir, sizeof cfg_dir, "%s", cfg_path);
     char *cfg_name = strrchr(cfg_path, '/') ? strrchr(cfg_path, '/') + 1 : cfg_path;
-    int ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-    if (ino >= 0 && inotify_add_watch(ino, dirname(cfg_dir), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) < 0) {
-        close(ino);
-        ino = -1;
-    }
+    ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    int cfg_wd = ino >= 0 ? inotify_add_watch(ino, dirname(cfg_dir), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) : -1;
+    watch_effect();
 
     sigset_t mask;
     sigemptyset(&mask);
@@ -587,7 +623,11 @@ int main(int argc, char **argv) {
             while ((len = read(ino, buf, sizeof buf)) > 0)
                 for (char *p = buf; p < buf + len;) {
                     struct inotify_event *ev = (struct inotify_event *)p;
-                    if (ev->len && !strcmp(ev->name, cfg_name)) hit = true;
+                    if (ev->wd == cfg_wd && ev->len && !strcmp(ev->name, cfg_name)) hit = true;
+                    // effectc renames many files into build/; wait for it to finish.
+                    bool effect_file = ev->len && (!strcmp(ev->name, "manifest.json") || strstr(ev->name, ".gles"));
+                    if ((ev->wd == effect_wd[0] || ev->wd == effect_wd[1]) && effect_file)
+                        effect_reload_at = now_seconds() + 0.3;
                     p += sizeof *ev + ev->len;
                 }
             if (hit) { rp_log("settings changed, reloading"); apply_settings(false); pause_dirty = true; }
@@ -602,6 +642,10 @@ int main(int argc, char **argv) {
         if (read(timer_fd, &expirations, sizeof expirations) < 0) continue;
 
         double now = now_seconds();
+        if (effect_reload_at > 0 && now >= effect_reload_at) {
+            effect_reload_at = 0;
+            reload_effect();
+        }
         if (now >= battery_at) {
             on_battery = rp_on_battery();
             power_saver = rp_power_saver();

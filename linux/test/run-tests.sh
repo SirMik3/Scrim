@@ -14,7 +14,7 @@ cp -r /src/linux/test/effects/. /tmp/effects/      # test-only effects (never pa
 for d in /tmp/effects/*/; do /src/tools/effectc "$d" >/dev/null; done
 BIN=/tmp/build/build/scrim
 ARGS=(--effect "$EFFECT" --wallpaper "$WALLPAPER" --no-pause-on-battery --stats --duration 12 ${EXTRA_ARGS:-})
-BACKENDS=${BACKENDS:-"snapshot wallpaper pausing control x11 fractional wayland"}
+BACKENDS=${BACKENDS:-"snapshot wallpaper pausing hotreload control x11 fractional wayland"}
 export XDG_RUNTIME_DIR=/tmp/xdg && mkdir -p -m 700 $XDG_RUNTIME_DIR
 
 # expect PATTERN COMMAND...: runs COMMAND, fails the test unless its output matches.
@@ -144,6 +144,31 @@ kill $APP && wait $APP || true
 grep -E "paused|resumed|x11:" /tmp/pausing.log | sed 's/^/  log: /'
 kill $XV 2>/dev/null || true
 unset DISPLAY
+fi
+
+if [[ $BACKENDS == *hotreload* ]]; then
+echo "== Effect hot-reload =="
+H=/tmp/hot && rm -rf $H && mkdir -p $H && cp -r /tmp/effects/plain $H/
+Xvfb :95 -screen 0 320x200x24 >/dev/null 2>&1 &
+XV=$!
+sleep 1
+pixel() { DISPLAY=:95 xwd -root -silent | convert xwd:- -format '%[pixel:p{160,100}]' info:; }
+DISPLAY=:95 SCRIM_EFFECTS_DIR=$H $BIN --effect plain --wallpaper "$WALLPAPER" --no-pause-on-battery --duration 30 2>/tmp/hot.log &
+APP=$!
+sleep 2
+echo 'void main() { fragColor = vec4(1.0, 0.0, 0.0, 1.0); }' > $H/plain/plain.frag
+/src/tools/effectc $H/plain >/dev/null && sleep 1.5
+expect "effect plain reloaded" cat /tmp/hot.log
+expect "srgb(255,0,0)" pixel                                    # red now, without a restart
+echo 'void main() { fragColor = nope; }' > $H/plain/plain.frag
+/src/tools/effectc $H/plain >/dev/null 2>&1 || echo "ok: effectc refused the broken shader"
+sleep 1.5
+expect "srgb(255,0,0)" pixel                                    # still the last good build
+echo 'this is not GLSL' > $H/plain/build/plain.gles && sleep 1.5
+expect "can't be loaded, keeping the running version" cat /tmp/hot.log
+expect "srgb(255,0,0)" pixel
+kill $APP && wait $APP || true
+kill $XV 2>/dev/null || true
 fi
 
 if [[ $BACKENDS == *control* ]]; then

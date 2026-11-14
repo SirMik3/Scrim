@@ -14,10 +14,12 @@ Requires glslangValidator and spirv-cross on PATH
 (macOS: brew install glslang spirv-cross).
 """
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PRELUDE = Path(__file__).resolve().parent / "prelude.glsl"
@@ -122,27 +124,37 @@ def compile_effect(effect_dir: Path) -> None:
     build = effect_dir / "build"
     build.mkdir(exist_ok=True)
 
-    for p in manifest["passes"]:
-        src_path = effect_dir / p["shader"]
-        stem = src_path.stem
-        source = prelude + defines + "#line 1\n" + src_path.read_text()
-        glsl = build / f"{stem}.glsl"
-        spv = build / f"{stem}.spv"
-        msl = build / f"{stem}.metal"
-        gles = build / f"{stem}.gles"
-        glsl.write_text(source)
-        try:
-            run(["glslangValidator", "-V", "-S", "frag", "--target-env", "vulkan1.0",
-                 "-o", str(spv), str(glsl)])
-        except EffectError as e:
-            raise EffectError(f"{p['shader']}: {e}\n(line numbers refer to {p['shader']})")
-        run(["spirv-cross", "--msl", "--msl-version", "20100", "--msl-decoration-binding",
-             "--output", str(msl), str(spv)])
-        run(["spirv-cross", "--es", "--version", "300", "--output", str(gles), str(spv)])
-        print(f"  {effect_dir.name}/{p['shader']} -> build/{stem}.{{glsl,spv,metal,gles}}")
+    # Compile every pass into a temporary folder, then move the results into build/
+    # only if all of them succeeded. A running Scrim reloads build/ when it changes,
+    # so it never sees half-written files, and a shader error keeps the last good build.
+    tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=build))
+    try:
+        outputs = []
+        for p in manifest["passes"]:
+            src_path = effect_dir / p["shader"]
+            stem = src_path.stem
+            source = prelude + defines + "#line 1\n" + src_path.read_text()
+            glsl, spv, msl, gles = (tmp / f"{stem}.{ext}" for ext in ("glsl", "spv", "metal", "gles"))
+            glsl.write_text(source)
+            try:
+                run(["glslangValidator", "-V", "-S", "frag", "--target-env", "vulkan1.0",
+                     "-o", str(spv), str(glsl)])
+            except EffectError as e:
+                raise EffectError(f"{p['shader']}: {e}\n(line numbers refer to {p['shader']})")
+            run(["spirv-cross", "--msl", "--msl-version", "20100", "--msl-decoration-binding",
+                 "--output", str(msl), str(spv)])
+            run(["spirv-cross", "--es", "--version", "300", "--output", str(gles), str(spv)])
+            outputs += [glsl, spv, msl, gles]
+            print(f"  {effect_dir.name}/{p['shader']} -> build/{stem}.{{glsl,spv,metal,gles}}")
+        for f in outputs:
+            os.replace(f, build / f.name)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     # Lets builds skip recompiling when nothing changed (and work without the shader
     # tools, e.g. from a release tarball that already contains build/).
-    (build / ".stamp").write_text("")
+    stamp = build / ".stamp.tmp"
+    stamp.write_text("")
+    os.replace(stamp, build / ".stamp")
 
 
 def main(argv: list) -> int:
