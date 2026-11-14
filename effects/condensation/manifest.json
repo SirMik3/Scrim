@@ -1,0 +1,19 @@
+{
+  "format": 2,
+  "id": "condensation",
+  "name": "Condensation",
+  "version": "0.1.0",
+  "license": "MIT",
+  "passes": [
+    { "shader": "fog.frag", "scale": 0.5, "persistent": true, "pixelFormat": "rgba16f" },
+    { "shader": "glass.frag" }
+  ],
+  "params": [
+    { "id": "fog",    "label": "Fog",                 "type": "float", "min": 0,   "max": 1,  "default": 0.7 },
+    { "id": "refog",  "label": "Seconds to fog over", "type": "float", "min": 3,   "max": 60, "default": 18 },
+    { "id": "drops",  "label": "Drops",               "type": "float", "min": 0,   "max": 1,  "default": 0.5 },
+    { "id": "speed",  "label": "Drop speed",          "type": "float", "min": 0.2, "max": 3,  "default": 1.0 },
+    { "id": "size",   "label": "Drop size",           "type": "float", "min": 0.5, "max": 2,  "default": 1.0 },
+    { "id": "darken", "label": "Darken",              "type": "float", "min": 0,   "max": 1,  "default": 0.25 }
+  ]
+}
